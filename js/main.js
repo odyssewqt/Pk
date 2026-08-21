@@ -2,7 +2,7 @@
 import { PokerGame, MAX_SEATS } from './engine.js';
 import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache } from './ui.js';
 import { describeEval, HAND_NAMES } from './poker.js';
-import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel } from './net.js';
+import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel, checkBackend } from './net.js';
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
 import { renderLobby, setLobbyMsg, renderWaiting, setNetStatus, clearOverlay } from './lobby.js';
 
@@ -71,6 +71,25 @@ function findOpenSeat(seats) {
 }
 
 // ---------- 当前渲染对象 ----------
+// 开牌停顿倒计时：让玩家清楚还有多久公布结果，避免以为卡住了
+let showdownTimer = null;
+
+function stopShowdownCountdown() {
+  if (showdownTimer) clearInterval(showdownTimer);
+  showdownTimer = null;
+}
+
+function startShowdownCountdown(ms) {
+  stopShowdownCountdown();
+  let left = Math.ceil(ms / 1000);
+  setTableMsg(`开牌！比较牌型… ${left}s`);
+  showdownTimer = setInterval(() => {
+    left--;
+    if (left <= 0) { stopShowdownCountdown(); return; }
+    setTableMsg(`开牌！比较牌型… ${left}s`);
+  }, 1000);
+}
+
 function currentGame() {
   return session.isHost ? game : viewModel;
 }
@@ -398,8 +417,14 @@ function initHostGame() {
     renderWaitControls(`等待 ${p.name} 行动…`);
     setTableMsg(`等待 ${p.name}`);
   });
+  game.on('revealCards', () => {
+    heroOpts = null;
+    renderWaitControls('开牌，请比较各家牌型…');
+  });
+  game.on('showdownPending', ({ ms }) => startShowdownCountdown(ms));
   game.on('handEnd', res => {
     heroOpts = null;
+    stopShowdownCountdown();
     renderEndControls();
     const meWin = res.winners.find(w => w.player.isHero);
     setTableMsg(meWin ? `你赢得 ${meWin.amount} 筹码！` : `${res.winners.map(w => w.player.name).join('、') || '其他玩家'} 赢下本局`);
@@ -495,6 +520,12 @@ function enterGameAsClient(state) {
   }
 
   const stage = state.stage;
+  if (stage === 'showdown') {
+    heroOpts = null;
+    renderWaitControls('开牌，请比较各家牌型…');
+    setTableMsg('开牌！比较牌型…');
+    return;
+  }
   if (stage === 'over') {
     heroOpts = null;
     renderEndControls();
@@ -737,3 +768,10 @@ function bindEvents() {
 
 bindEvents();
 showLobby();
+
+// 启动自检：提前暴露后端不可达问题，而不是等到点建房才报错
+checkBackend().then(ok => {
+  if (!ok) {
+    setLobbyMsg('联机服务当前不可达，建房/加入会失败。请检查网络代理或浏览器插件是否拦截了 supabase.co', 'error');
+  }
+});

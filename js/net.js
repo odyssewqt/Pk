@@ -31,12 +31,28 @@ export function makeRoomCode() {
 
 // ---------- REST 操作 ----------
 
+// 统一包一层 fetch：把浏览器层面的 "Failed to fetch" 翻译成看得懂的原因
+async function safeFetch(url, options, label) {
+  try {
+    return await fetch(url, options);
+  } catch (err) {
+    console.error(`[net] ${label} 网络层失败`, err);
+    const isHttpPage = location.protocol === 'http:';
+    let reason = '浏览器没能把请求发出去，通常是以下原因之一：';
+    reason += '① 网络/代理拦截了 supabase.co；';
+    reason += '② 浏览器插件（广告拦截、隐私保护）拦下了请求；';
+    if (isHttpPage) reason += '③ 当前页面是 http，混合内容被拦截，请用 https 打开；';
+    reason += '④ 该 Supabase 项目已被暂停或删除。';
+    throw new Error(`${label}：${reason}（控制台 Network 面板可看到具体报错）`);
+  }
+}
+
 export async function createRoom(code, hostId, state) {
-  const res = await fetch(`${REST}/rooms`, {
+  const res = await safeFetch(`${REST}/rooms`, {
     method: 'POST',
     headers: { ...HEADERS, 'Prefer': 'return=representation' },
     body: JSON.stringify({ code, host_id: hostId, state })
-  });
+  }, '建房请求发送失败');
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`建房失败 ${res.status}: ${txt}`);
@@ -46,9 +62,9 @@ export async function createRoom(code, hostId, state) {
 }
 
 export async function fetchRoom(code) {
-  const res = await fetch(`${REST}/rooms?code=eq.${encodeURIComponent(code)}&select=*`, {
+  const res = await safeFetch(`${REST}/rooms?code=eq.${encodeURIComponent(code)}&select=*`, {
     headers: HEADERS
-  });
+  }, '查询房间请求发送失败');
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`读取房间失败 ${res.status}: ${txt}`);
@@ -58,16 +74,28 @@ export async function fetchRoom(code) {
 }
 
 export async function updateRoomState(code, state) {
-  const res = await fetch(`${REST}/rooms?code=eq.${encodeURIComponent(code)}`, {
+  const res = await safeFetch(`${REST}/rooms?code=eq.${encodeURIComponent(code)}`, {
     method: 'PATCH',
     headers: { ...HEADERS, 'Prefer': 'return=minimal' },
     body: JSON.stringify({ state, updated_at: new Date().toISOString() })
-  });
+  }, '同步状态请求发送失败');
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`写入状态失败 ${res.status}: ${txt}`);
   }
   return true;
+}
+
+// 自检：确认后端可达，返回 true/false 并在控制台打印详情
+export async function checkBackend() {
+  try {
+    const res = await fetch(`${REST}/rooms?select=code&limit=1`, { headers: HEADERS });
+    console.log('[net] 后端自检 HTTP', res.status);
+    return res.ok;
+  } catch (err) {
+    console.error('[net] 后端自检失败，请求未能发出', err);
+    return false;
+  }
 }
 
 // ---------- Realtime 订阅 ----------

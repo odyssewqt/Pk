@@ -37,6 +37,9 @@ export class PokerGame {
     this.heroSeatId = options.heroSeatId != null ? options.heroSeatId : 0;
     // 联机模式下 AI 与流程只在房主端推进
     this.isAuthority = options.isAuthority !== false;
+    // 开牌后的停顿：让玩家有时间自己比较牌型，再公布赢家
+    this.showdownPause = options.showdownPause || 4000;
+    this.showdownPerPlayer = options.showdownPerPlayer || 600;
     this.initPlayers();
     this.resetTableState();
   }
@@ -466,8 +469,19 @@ export class PokerGame {
       p.eval = evaluateBest(p.hole.concat(this.community));
       p.showCards = true;
     });
+
+    // 先只亮牌 + 打出各家牌型，让玩家有时间自己比较
+    cont.forEach(p => this.log(`${p.name} 亮牌 ${p.hole.map(c => c.label + c.symbol).join(' ')} → ${describeEval(p.eval)}`, 'reveal'));
+    this.emit('revealCards', { contenders: cont });
     this.emit('update');
 
+    // 停顿之后再结算并公布赢家；停顿时长随参与人数增加
+    const pause = this.showdownPause + Math.max(0, cont.length - 2) * this.showdownPerPlayer;
+    this.emit('showdownPending', { ms: pause, contenders: cont });
+    setTimeout(() => this.settleShowdown(cont), pause);
+  }
+
+  settleShowdown(cont) {
     const pots = this.buildSidePots();
     const winnersAgg = new Map();
 
@@ -488,8 +502,6 @@ export class PokerGame {
       const label = pots.length > 1 ? (idx === 0 ? '主池' : `边池${idx}`) : '底池';
       this.log(`${label} ${pot.amount} → ${tied.map(p => p.name).join(' / ')}（${describeEval(best.eval)}）`, 'win');
     });
-
-    cont.forEach(p => this.log(`${p.name} 亮牌 ${p.hole.map(c => c.label + c.symbol).join(' ')} → ${describeEval(p.eval)}`, 'reveal'));
 
     this.record.biggestPot = Math.max(this.record.biggestPot, this.pot);
     const winners = [...winnersAgg.entries()].map(([id, amount]) => ({
