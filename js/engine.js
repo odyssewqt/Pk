@@ -40,6 +40,12 @@ export class PokerGame {
     // 开牌后的停顿：让玩家有时间自己比较牌型，再公布赢家
     this.showdownPause = options.showdownPause || 4000;
     this.showdownPerPlayer = options.showdownPerPlayer || 600;
+    // 无限大牌池：只记账，不设上限。allIn 输光后自动补码的额度
+    this.autoBorrow = options.autoBorrow || this.startingStack;
+    // 账本按稳定身份存放（真人用 seatOwner，AI 用 seat:序号），
+    // 这样 applySeats 重建 players 后借还记录不会丢
+    this.ledger = new Map();
+    this.bankLog = [];
     this.initPlayers();
     this.resetTableState();
   }
@@ -118,9 +124,160 @@ export class PokerGame {
       p.eval = null;
       p.winAmount = 0;
     });
+    this.syncLedger();
     if (this.dealerIndex == null) {
       this.dealerIndex = Math.floor(Math.random() * this.players.length);
     }
+  }
+
+  // 账本身份：真人认 seatOwner（换座位也跟着人），AI 认座位号
+  ledgerKey(p) {
+    if (p.empty) return null;
+    return p.seatOwner ? `owner:${p.seatOwner}` : `seat:${p.id}`;
+  }
+
+  // 把账本挂到 players 上，缺失的按当前筹码建账
+  syncLedger() {
+    if (!this.ledger) this.ledger = new Map();
+    this.players.forEach(p => {
+      const key = this.ledgerKey(p);
+      if (!key) {
+        p.borrowed = 0; p.repaid = 0; p.buyIn = 0; p.ledgerKey = null;
+        return;
+      }
+      let rec = this.ledger.get(key);
+      if (!rec) {
+        // 首次建账：当前筹码即本人的初始买入
+        rec = { borrowed: 0, repaid: 0, buyIn: p.stack > 0 ? p.stack : this.startingStack };
+        this.ledger.set(key, rec);
+      }
+      p.ledgerKey = key;
+      p.borrowed = rec.borrowed;
+      p.repaid = rec.repaid;
+      p.buyIn = rec.buyIn;
+    });
+  }
+
+  ledgerOf(p) {
+    const key = this.ledgerKey(p);
+    if (!key) return null;
+    if (!this.ledger.has(key)) this.syncLedger();
+    return this.ledger.get(key);
+  }
+
+  // 玩家净欠牌池
+  debtOf(p) {
+    const rec = this.ledgerOf(p);
+    if (!rec) return 0;
+    return Math.max(0, rec.borrowed - rec.repaid);
+  }
+
+  // 借筹码：金额自由，牌池无限大，只记账
+  borrow(playerId, amount, reason = '') {
+    const p = this.players[playerId];
+    if (!p || p.empty) return { ok: false, msg: '该座位不可借码' };
+    const amt = Math.floor(Number(amount));
+    if (!Number.isFinite(amt) || amt <= 0) return { ok: false, msg: '借入金额必须是正整数' };
+    // 牌局进行中不允许改动筹码，否则会破坏当前下注轮的边池计算
+    if (this.stage !== 'idle' && this.stage !== 'over') {
+      return { ok: false, msg: '牌局进行中无法借码，请等本手结束' };
+    }
+    const rec = this.ledgerOf(p);
+    rec.borrowed += amt;
+    p.stack += amt;
+    this.syncLedger();
+    const note = `${p.name} 从牌池借入 ${amt}${reason ? `（${reason}）` : ''} · 累计借 ${rec.borrowed} / 还 ${rec.repaid} · 净欠 ${Math.max(0, rec.borrowed - rec.repaid)}`;
+    this.log(note, 'bank');
+    this.bankLog.push({ seatId: p.id, name: p.name, type: 'borrow', amount: amt, reason, ts: Date.now() });
+    this.emit('bankChange', { player: p, type: 'borrow', amount: amt });
+    this.emit('update');
+    return { ok: true, amount: amt };
+  }
+
+  // 归还筹码：不能超过手上筹码，也不能超过净欠额
+  repay(playerId, amount) {
+    const p = this.players[playerId];
+    if (!p || p.empty) return { ok: false, msg: '该座位不可还码' };
+    const amt = Math.floor(Number(amount));
+    if (!Number.isFinite(amt) || amt <= 0) return { ok: false, msg: '归还金额必须是正整数' };
+    if (this.stage !== 'idle' && this.stage !== 'over') {
+      return { ok: false, msg: '牌局进行中无法还码，请等本手结束' };
+    }
+    const debt = this.debtOf(p);
+    if (debt <= 0) return { ok: false, msg: '你没有欠牌池筹码' };
+    if (amt > debt) return { ok: false, msg: `最多只需归还 ${debt}` };
+    if (amt > p.stack) return { ok: false, msg: `手上只有 ${p.stack}，不够归还 ${amt}` };
+    const rec = this.ledgerOf(p);
+    rec.repaid += amt;
+    p.stack -= amt;
+    this.syncLedger();
+    this.log(`${p.name} 向牌池归还 ${amt} · 累计借 ${rec.borrowed} / 还 ${rec.repaid} · 净欠 ${Math.max(0, rec.borrowed - rec.repaid)}`, 'bank');
+    this.bankLog.push({ seatId: p.id, name: p.name, type: 'repay', amount: amt, ts: Date.now() });
+    this.emit('bankChange', { player: p, type: 'repay', amount: amt });
+    this.emit('update');
+    return { ok: true, amount: amt };
+  }
+
+  // 本手结束后：把输光的人自动补到起始筹码线
+  autoRefillBusted() {
+    if (!this.isAuthority) return [];
+    const refilled = [];
+    this.players.forEach(p => {
+      if (p.empty || p.stack > 0) return;
+      const rec = this.ledgerOf(p);
+      if (!rec) return;
+      rec.borrowed += this.autoBorrow;
+      p.stack += this.autoBorrow;
+      refilled.push({ seatId: p.id, name: p.name, amount: this.autoBorrow });
+      this.bankLog.push({ seatId: p.id, name: p.name, type: 'borrow', amount: this.autoBorrow, reason: '输光自动补码', ts: Date.now() });
+      this.log(`${p.name} 筹码归零，自动从牌池借入 ${this.autoBorrow} · 累计借 ${rec.borrowed} / 还 ${rec.repaid} · 净欠 ${Math.max(0, rec.borrowed - rec.repaid)}`, 'bank');
+    });
+    if (refilled.length) {
+      this.syncLedger();
+      this.emit('bankChange', { type: 'autoRefill', refilled });
+      this.emit('update');
+    }
+    return refilled;
+  }
+
+  // 房主结算：净盈亏 = 当前筹码 - 初始买入 - 累计借入 + 累计归还
+  settleTable() {
+    this.syncLedger();
+    const rows = this.players.filter(p => !p.empty).map(p => {
+      const rec = this.ledgerOf(p) || { borrowed: 0, repaid: 0, buyIn: this.startingStack };
+      const net = p.stack - rec.buyIn - rec.borrowed + rec.repaid;
+      return {
+        seatId: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        isAI: !!p.isAI,
+        isHero: !!p.isHero,
+        stack: p.stack,
+        buyIn: rec.buyIn,
+        borrowed: rec.borrowed,
+        repaid: rec.repaid,
+        debt: Math.max(0, rec.borrowed - rec.repaid),
+        net
+      };
+    }).sort((a, b) => b.net - a.net);
+
+    const totalNet = rows.reduce((s, r) => s + r.net, 0);
+    const bankOut = rows.reduce((s, r) => s + r.borrowed - r.repaid, 0);
+    const settlement = { rows, totalNet, bankOut, hands: this.handNo, ts: Date.now() };
+    this.settlement = settlement;
+
+    this.log('—— 本场结算 ——', 'stage');
+    rows.forEach(r => {
+      const tag = r.net > 0 ? `赢 ${r.net}` : r.net < 0 ? `输 ${Math.abs(r.net)}` : '不输不赢';
+      this.log(`${r.name}：手上 ${r.stack} · 买入 ${r.buyIn} · 借 ${r.borrowed} · 还 ${r.repaid} → ${tag}`, r.net >= 0 ? 'win' : 'fold');
+    });
+    if (totalNet !== 0) {
+      this.log(`校验：全场净盈亏合计 ${totalNet}（应为 0，非 0 说明有筹码未结清）`, 'warn');
+    }
+
+    this.emit('settled', settlement);
+    this.emit('update');
+    return settlement;
   }
 
   resetTableState() {
@@ -521,10 +678,8 @@ export class PokerGame {
     this.record.hands++;
     if (winner && winner.isHero) this.record.wins++;
     else this.record.losses++;
-    const hero = this.heroPlayer();
-    if (hero && hero.stack <= 0) {
-      setTimeout(() => this.emit('gameOver', { hero }), 400);
-    }
+    // 输光不再淘汰：本手结束后自动从牌池借码补回起始线
+    setTimeout(() => this.autoRefillBusted(), 600);
   }
 
   // 牌局间隙生效：按新座位表重建玩家，已在座者保留筹码，新入座者拿起始筹码

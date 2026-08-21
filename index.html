@@ -79,6 +79,7 @@ tailwind.config = {
 
       <div class="flex items-center gap-2">
         <span id="netBadge" class="px-2 py-1 rounded text-[11px] bg-white/10 text-slate-300"></span>
+        <button id="btnSettle" class="hidden px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 transition text-sm font-bold"><i class="ri-calculator-line mr-1"></i>结算</button>
         <button id="btnRules" class="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition text-sm"><i class="ri-book-2-line mr-1"></i>规则</button>
         <button id="btnLeave" class="px-3 py-2 rounded-lg bg-rose-600/80 hover:bg-rose-600 transition text-sm"><i class="ri-logout-box-line mr-1"></i>离开</button>
       </div>
@@ -132,6 +133,22 @@ tailwind.config = {
           <span id="handStrengthTag" class="text-xs px-2 py-0.5 rounded bg-white/10">—</span>
         </div>
         <div class="p-4 space-y-3" id="strengthPanel"></div>
+      </div>
+
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
+        <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+          <h2 class="font-bold text-sm"><i class="ri-bank-line mr-1 text-gold"></i>牌池借贷</h2>
+          <span class="text-[11px] px-2 py-0.5 rounded bg-violet-500/20 text-violet-300">无限筹码</span>
+        </div>
+        <div class="p-4 space-y-3">
+          <div id="bankSummary" class="grid grid-cols-3 gap-2 text-center"></div>
+          <div class="flex gap-2">
+            <button id="btnBorrow" class="flex-1 px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-bold transition"><i class="ri-download-2-line mr-1"></i>借筹码</button>
+            <button id="btnRepay" class="flex-1 px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold transition"><i class="ri-upload-2-line mr-1"></i>还筹码</button>
+          </div>
+          <div id="bankLedger" class="space-y-1.5"></div>
+          <p class="text-[11px] text-slate-500 leading-relaxed">牌池筹码无上限，借多少自己定。输光会自动补码，所有借还都记账，结算时一并核算。</p>
+        </div>
       </div>
 
       <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden flex-1 min-h-[240px] flex flex-col">

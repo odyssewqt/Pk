@@ -1,6 +1,6 @@
 // 主入口：大厅 → 联机对局装配
 import { PokerGame, MAX_SEATS } from './engine.js';
-import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache } from './ui.js';
+import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache, showAmountModal, settlementHTML } from './ui.js';
 import { describeEval, HAND_NAMES } from './poker.js';
 import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel, checkBackend } from './net.js';
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
@@ -30,6 +30,8 @@ const session = {
 let game = null;      // 房主端：真引擎；客机端：null
 let viewModel = null; // 客机端：渲染用视图
 let heroOpts = null;
+let lastSettlementTs = 0; // 客机侧结算单去重
+const handledBankReq = new Set(); // 房主侧借还请求去重
 
 const RULES_HTML = `
 <p class="text-slate-300">德州扑克使用一副 52 张牌，每位玩家发 2 张底牌，桌面依次开出 5 张公共牌，用 7 张中最好的 5 张组成牌型比大小。</p>
@@ -432,13 +434,18 @@ function initHostGame() {
     // 牌局间隙：让等待中的新玩家入座
     if (seatChangePending) setTimeout(() => applySeatChange(), 300);
   });
+  game.on('bankChange', () => { renderTable(game); });
   game.on('gameOver', ({ hero }) => {
     showModal({
-      title: hero.stack <= 0 ? '💀 你已破产' : '🏆 牌局结束',
-      body: `<p>本次共进行 <b class="text-gold">${game.record.hands}</b> 手，胜 <b class="text-emerald-300">${game.record.wins}</b> 手，最终筹码 <b class="text-gold">${hero.stack}</b>。</p>`,
-      actions: [{ label: '重新开局', primary: true, onClick: () => { clearLog(); initHostGame(); } }]
+      title: '🏆 牌局暂停',
+      body: `<p>本次共进行 <b class="text-gold">${game.record.hands}</b> 手，胜 <b class="text-emerald-300">${game.record.wins}</b> 手，当前筹码 <b class="text-gold">${hero.stack}</b>。</p>
+        <p class="text-xs text-slate-400">人数不足或需要补码时，可从牌池借入筹码后继续。</p>`,
+      actions: [{ label: '知道了', primary: true }]
     });
   });
+
+  const settleBtn = $('btnSettle');
+  if (settleBtn) settleBtn.classList.toggle('hidden', !session.isHost);
 
   renderIdleControls();
   renderTable(game);
@@ -483,6 +490,21 @@ function pushState() {
 
 function consumeClientAction(action) {
   if (!game || !session.isHost) return;
+
+  // 借还筹码请求：不属于下注轮，单独处理，不受行动顺序限制
+  if (action.action === 'borrow' || action.action === 'repay') {
+    if (action.seatId === session.mySeatId) return;
+    // 同一条请求可能随多次状态事件重复到达，按 ts 去重，避免重复记账
+    const rid = `${action.seatId}:${action.ts}`;
+    if (handledBankReq.has(rid)) return;
+    handledBankReq.add(rid);
+    const res = action.action === 'borrow'
+      ? game.borrow(action.seatId, action.amount || 0)
+      : game.repay(action.seatId, action.amount || 0);
+    if (!res.ok) game.log(`${game.players[action.seatId]?.name || '玩家'} 的${action.action === 'borrow' ? '借码' : '还码'}请求被拒绝：${res.msg}`, 'warn');
+    return;
+  }
+
   if (action.seatId === session.mySeatId) return;
   if (game.activeIndex !== action.seatId) {
     console.warn('[sync] 丢弃非当前行动方的动作', action);
@@ -495,6 +517,103 @@ function consumeClientAction(action) {
   game.applyAction(action.seatId, action.action, action.amount || 0);
 }
 
+// ================= 牌池借贷 =================
+
+// 取当前渲染对象里的本人座位
+function mySeatPlayer() {
+  const g = currentGame();
+  if (!g) return null;
+  return g.players.find(p => p.id === session.mySeatId) || null;
+}
+
+function bankIdle() {
+  const g = currentGame();
+  if (!g) return false;
+  return g.stage === 'idle' || g.stage === 'over';
+}
+
+function handleBorrow() {
+  const me = mySeatPlayer();
+  if (!me) return;
+  if (!bankIdle()) {
+    showModal({ title: '暂时无法借码', body: '<p>牌局进行中不能改动筹码，等本手结束后再借。</p>', actions: [{ label: '知道了', primary: true }] });
+    return;
+  }
+  const g = currentGame();
+  const bb = g ? g.bigBlind : 50;
+  showAmountModal({
+    title: '从牌池借筹码',
+    hint: `牌池筹码<b class="text-violet-300">无上限</b>，借多少由你决定。借出的筹码会全额记账，结算时从你的盈利中扣除。<br>当前手上 <b class="text-gold">${me.stack}</b> · 已借 <b class="text-violet-300">${me.borrowed || 0}</b> · 净欠 <b class="text-rose-300">${Math.max(0, (me.borrowed || 0) - (me.repaid || 0))}</b>`,
+    presets: [bb * 10, bb * 20, bb * 40, bb * 100],
+    max: 0,
+    confirmLabel: '确认借入',
+    onConfirm: amt => {
+      if (session.isHost) {
+        const res = game.borrow(session.mySeatId, amt);
+        if (!res.ok) showModal({ title: '借码失败', body: `<p>${res.msg}</p>`, actions: [{ label: '知道了', primary: true }] });
+      } else {
+        sendClientAction('borrow', amt);
+        setTableMsg(`已申请借入 ${amt}，等待同步…`);
+      }
+    }
+  });
+}
+
+function handleRepay() {
+  const me = mySeatPlayer();
+  if (!me) return;
+  if (!bankIdle()) {
+    showModal({ title: '暂时无法还码', body: '<p>牌局进行中不能改动筹码，等本手结束后再还。</p>', actions: [{ label: '知道了', primary: true }] });
+    return;
+  }
+  const debt = Math.max(0, (me.borrowed || 0) - (me.repaid || 0));
+  if (debt <= 0) {
+    showModal({ title: '无需归还', body: '<p>你目前没有欠牌池筹码。</p>', actions: [{ label: '知道了', primary: true }] });
+    return;
+  }
+  const cap = Math.min(debt, me.stack);
+  if (cap <= 0) {
+    showModal({ title: '筹码不足', body: `<p>你净欠牌池 <b class="text-rose-300">${debt}</b>，但手上没有筹码可还。</p>`, actions: [{ label: '知道了', primary: true }] });
+    return;
+  }
+  const presets = [Math.floor(cap / 4), Math.floor(cap / 2), Math.floor(cap * 3 / 4)].filter(v => v > 0);
+  showAmountModal({
+    title: '向牌池归还筹码',
+    hint: `你净欠牌池 <b class="text-rose-300">${debt}</b>，手上有 <b class="text-gold">${me.stack}</b>，本次最多可还 <b class="text-emerald-300">${cap}</b>。归还多少自由决定。`,
+    presets: [...new Set(presets)],
+    max: cap,
+    confirmLabel: '确认归还',
+    onConfirm: amt => {
+      if (session.isHost) {
+        const res = game.repay(session.mySeatId, amt);
+        if (!res.ok) showModal({ title: '还码失败', body: `<p>${res.msg}</p>`, actions: [{ label: '知道了', primary: true }] });
+      } else {
+        sendClientAction('repay', amt);
+        setTableMsg(`已申请归还 ${amt}，等待同步…`);
+      }
+    }
+  });
+}
+
+// 房主结算：算清每个人的真实输赢
+function handleSettle() {
+  if (!session.isHost || !game) return;
+  if (!bankIdle()) {
+    showModal({ title: '暂时无法结算', body: '<p>牌局进行中，请等本手结束后再结算。</p>', actions: [{ label: '知道了', primary: true }] });
+    return;
+  }
+  const s = game.settleTable();
+  showSettlementModal(s);
+}
+
+function showSettlementModal(s) {
+  showModal({
+    title: '💰 本场结算',
+    body: settlementHTML(s),
+    actions: [{ label: '关闭', primary: true }]
+  });
+}
+
 // ================= 客机端 =================
 
 function enterGameAsClient(state) {
@@ -505,6 +624,13 @@ function enterGameAsClient(state) {
   }
   viewModel = buildViewModel(state, session.mySeatId, CLIENT_ID);
   renderTable(viewModel);
+
+  // 房主发起结算后，客机也弹出同一份结算单（按时间戳去重，避免重复弹）
+  const st = state.settlement;
+  if (st && st.ts && st.ts !== lastSettlementTs) {
+    lastSettlementTs = st.ts;
+    showSettlementModal(st);
+  }
 
   // 同步日志：只补新增部分
   syncClientLogs(state.logs || []);
@@ -745,6 +871,10 @@ function bindEvents() {
   $('btnRules').addEventListener('click', () => {
     showModal({ title: '德州扑克规则速览', body: RULES_HTML, actions: [{ label: '知道了', primary: true }] });
   });
+
+  $('btnBorrow').addEventListener('click', handleBorrow);
+  $('btnRepay').addEventListener('click', handleRepay);
+  $('btnSettle').addEventListener('click', handleSettle);
 
   $('btnLeave').addEventListener('click', () => {
     showModal({

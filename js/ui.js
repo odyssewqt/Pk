@@ -65,6 +65,7 @@ function seatHTML(game, player, isHero, blinds) {
   const winner = player.winAmount > 0;
   const holeKnown = player.hole.filter(Boolean);
   const holeCount = player.hole.length;
+  const debt = Math.max(0, (player.borrowed || 0) - (player.repaid || 0));
 
   const cards = holeCount
     ? player.hole.map(c => cardHTML(c, { hidden: !reveal || !c, size: isHero ? 'lg' : 'sm' })).join('')
@@ -89,6 +90,7 @@ function seatHTML(game, player, isHero, blinds) {
         <div class="flex items-center gap-2 mt-0.5">
           <span class="text-gold font-mono font-bold text-sm">${player.stack}</span>
           ${chipHTML(player.bet)}
+          ${debt > 0 ? `<span class="px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-400/40 text-[10px] font-bold">欠池 ${debt}</span>` : ''}
         </div>
         <div class="text-[11px] mt-0.5 ${player.folded ? 'text-rose-300' : 'text-emerald-200/80'} truncate h-4">${busted ? '已淘汰' : player.lastAction || ''}</div>
       </div>
@@ -134,7 +136,78 @@ export function renderTable(game) {
   renderStats(game);
   renderStrength(game);
   renderRecord(game);
+  renderBank(game);
 }
+
+// 牌池借贷面板：本人账目 + 全桌借还一览
+function renderBank(game) {
+  const hero = heroOf(game);
+  const summary = $('bankSummary');
+  const ledger = $('bankLedger');
+  if (!summary || !ledger) return;
+
+  const debtOf = p => Math.max(0, (p.borrowed || 0) - (p.repaid || 0));
+  const myDebt = hero ? debtOf(hero) : 0;
+
+  const cells = [
+    { label: '我已借', value: hero ? (hero.borrowed || 0) : 0, color: 'text-violet-300' },
+    { label: '我已还', value: hero ? (hero.repaid || 0) : 0, color: 'text-emerald-300' },
+    { label: '我净欠', value: myDebt, color: myDebt > 0 ? 'text-rose-300' : 'text-slate-400' }
+  ];
+  summary.innerHTML = cells.map(c => `
+    <div class="rounded-lg bg-white/5 p-2">
+      <div class="font-mono font-black text-base ${c.color}">${c.value}</div>
+      <div class="text-[10px] text-slate-400 mt-0.5">${c.label}</div>
+    </div>`).join('');
+
+  const rows = game.players.filter(p => !p.empty && ((p.borrowed || 0) > 0 || (p.repaid || 0) > 0));
+  ledger.innerHTML = rows.length
+    ? rows.map(p => {
+      const d = debtOf(p);
+      return `<div class="flex items-center gap-2 text-[11px] rounded-lg bg-white/5 px-2 py-1.5">
+        <span>${p.avatar}</span>
+        <span class="flex-1 truncate font-bold">${p.name}</span>
+        <span class="text-violet-300 font-mono">借${p.borrowed || 0}</span>
+        <span class="text-emerald-300 font-mono">还${p.repaid || 0}</span>
+        <span class="font-mono font-bold ${d > 0 ? 'text-rose-300' : 'text-slate-500'}">欠${d}</span>
+      </div>`;
+    }).join('')
+    : '<p class="text-[11px] text-slate-500">还没有人向牌池借过筹码。</p>';
+}
+
+// 结算弹窗：净盈亏 = 手上筹码 - 初始买入 - 累计借入 + 累计归还
+export function settlementHTML(settlement) {
+  const rows = settlement.rows.map(r => {
+    const tag = r.net > 0
+      ? `<span class="text-emerald-300 font-black">+${r.net}</span>`
+      : r.net < 0
+        ? `<span class="text-rose-300 font-black">${r.net}</span>`
+        : '<span class="text-slate-400 font-black">0</span>';
+    return `<div class="rounded-lg ${r.net > 0 ? 'bg-emerald-500/10 border border-emerald-400/30' : r.net < 0 ? 'bg-rose-500/10 border border-rose-400/30' : 'bg-white/5'} p-2.5">
+      <div class="flex items-center gap-2">
+        <span class="text-lg">${r.avatar}</span>
+        <span class="font-bold flex-1 truncate">${r.name}${r.isAI ? '<span class="ml-1 text-[10px] text-slate-400">AI</span>' : ''}</span>
+        <span class="font-mono text-base">${tag}</span>
+      </div>
+      <div class="mt-1 grid grid-cols-4 gap-1 text-[11px] text-slate-400 font-mono">
+        <span>手上 <b class="text-gold">${r.stack}</b></span>
+        <span>买入 <b class="text-slate-200">${r.buyIn}</b></span>
+        <span>借 <b class="text-violet-300">${r.borrowed}</b></span>
+        <span>还 <b class="text-emerald-300">${r.repaid}</b></span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const check = settlement.totalNet === 0
+    ? '<span class="text-emerald-300">全场净盈亏合计为 0，账目平衡 ✓</span>'
+    : `<span class="text-rose-300">全场净盈亏合计 ${settlement.totalNet}，账目未平（可能有人手上还压着未结清筹码）</span>`;
+
+  return `<div class="mb-3 text-xs text-slate-400">共进行 <b class="text-gold">${settlement.hands}</b> 手 · 牌池净放出 <b class="text-violet-300">${settlement.bankOut}</b> 筹码</div>
+    <div class="mb-3 rounded-lg bg-white/5 p-2.5 text-[11px] leading-relaxed text-slate-300">
+      净盈亏 = 手上筹码 − 初始买入 − 累计借入 + 累计归还
+    </div>
+    <div class="space-y-2">${rows}</div>
+    <div class="mt-3 text-[11px]">${check}</div>`;
 
 function renderStats(game) {
   const hero = heroOf(game);
@@ -201,7 +274,8 @@ function renderRecord(game) {
 const LOG_STYLE = {
   info: 'text-slate-400', stage: 'text-gold font-bold', fold: 'text-rose-300',
   call: 'text-sky-300', raise: 'text-amber-300', check: 'text-slate-300',
-  win: 'text-emerald-300 font-bold', reveal: 'text-violet-300', warn: 'text-rose-400 font-bold'
+  win: 'text-emerald-300 font-bold', reveal: 'text-violet-300', warn: 'text-rose-400 font-bold',
+  bank: 'text-violet-300 font-bold'
 };
 
 export function appendLog(entry) {
@@ -242,3 +316,57 @@ export function showModal({ title, body, actions = [] }) {
 }
 
 export function resetEquityCache() { /* 已移除胜率计算，保留空实现以兼容调用方 */ }
+
+// 借还筹码的金额输入弹窗：支持快捷额度与手动输入，max 为 0 时表示不限（借码）
+export function showAmountModal({ title, hint, presets = [], max = 0, confirmLabel = '确定', onConfirm }) {
+  const root = $('modalRoot');
+  const capped = max > 0;
+  root.innerHTML = `
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" data-overlay>
+      <div class="w-full max-w-md rounded-2xl bg-slate-900 border border-white/15 shadow-2xl overflow-hidden">
+        <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+          <h3 class="font-black text-lg text-gold">${title}</h3>
+          <button data-close class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-5 space-y-3 text-sm">
+          <p class="text-slate-300 text-xs leading-relaxed">${hint}</p>
+          <div class="flex flex-wrap gap-2">
+            ${presets.map(v => `<button data-preset="${v}" class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-gold hover:text-ink text-xs font-bold transition">${v}</button>`).join('')}
+            ${capped ? `<button data-preset="${max}" class="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-xs font-bold transition">全部 ${max}</button>` : ''}
+          </div>
+          <input id="amountInput" type="number" min="1" ${capped ? `max="${max}"` : ''} step="1"
+            class="w-full px-3 py-2.5 rounded-lg bg-black/40 border border-white/20 focus:border-gold outline-none font-mono text-lg text-gold"
+            placeholder="输入金额">
+          <p data-err class="text-[11px] text-rose-300 h-4"></p>
+        </div>
+        <div class="px-5 py-4 border-t border-white/10 flex justify-end gap-2">
+          <button data-cancel class="px-4 py-2 rounded-lg text-sm font-bold bg-white/10 hover:bg-white/20 transition">取消</button>
+          <button data-ok class="px-4 py-2 rounded-lg text-sm font-bold bg-gold text-ink hover:brightness-110 transition">${confirmLabel}</button>
+        </div>
+      </div>
+    </div>`;
+
+  const input = root.querySelector('#amountInput');
+  const err = root.querySelector('[data-err]');
+  const close = () => { root.innerHTML = ''; };
+
+  root.querySelectorAll('[data-preset]').forEach(b => {
+    b.addEventListener('click', () => { input.value = b.dataset.preset; err.textContent = ''; input.focus(); });
+  });
+  root.querySelector('[data-close]').addEventListener('click', close);
+  root.querySelector('[data-cancel]').addEventListener('click', close);
+  root.querySelector('[data-overlay]').addEventListener('click', e => {
+    if (e.target.dataset.overlay !== undefined) close();
+  });
+
+  const submit = () => {
+    const val = Math.floor(Number(input.value));
+    if (!Number.isFinite(val) || val <= 0) { err.textContent = '请输入大于 0 的整数金额'; return; }
+    if (capped && val > max) { err.textContent = `最多只能是 ${max}`; return; }
+    close();
+    onConfirm && onConfirm(val);
+  };
+  root.querySelector('[data-ok]').addEventListener('click', submit);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  setTimeout(() => input.focus(), 50);
+}

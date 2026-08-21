@@ -43,6 +43,9 @@ export function serializeGame(game, room) {
       lastAction: p.lastAction,
       showCards: p.showCards,
       winAmount: p.winAmount,
+      borrowed: p.borrowed || 0,
+      repaid: p.repaid || 0,
+      buyIn: p.buyIn || 0,
       hole: maskedHole(p, false),
       // 每个座位的真实底牌单独放一份，按 owner 分发
       holeFor: p.seatOwner ? { owner: p.seatOwner, cards: p.hole.map(cardToJSON) } : null,
@@ -54,6 +57,7 @@ export function serializeGame(game, room) {
       }))
     } : null,
     logs: game.logs.slice(-40),
+    settlement: game.settlement || null,
     action: null,
     ts: Date.now()
   };
@@ -86,6 +90,9 @@ export function buildViewModel(state, mySeatId, myClientId) {
       ...p,
       isHero: mine,
       hole,
+      borrowed: p.borrowed || 0,
+      repaid: p.repaid || 0,
+      buyIn: p.buyIn || 0,
       eval: p.evalName ? { name: p.evalName } : null
     };
   });
@@ -105,8 +112,10 @@ export function buildViewModel(state, mySeatId, myClientId) {
     community: (state.community || []).filter(Boolean),
     players,
     results: state.results,
+    settlement: state.settlement || null,
     logs: state.logs || [],
     record: { hands: 0, wins: 0, losses: 0, biggestPot: 0 },
+    debtOf(p) { return Math.max(0, (p.borrowed || 0) - (p.repaid || 0)); },
     contenders() { return this.players.filter(p => !p.folded); },
     livePlayers() { return this.players.filter(p => !p.folded); }
   };
