@@ -1,7 +1,7 @@
 // 主入口：大厅 → 联机对局装配
 import { PokerGame, MAX_SEATS } from './engine.js';
 import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache } from './ui.js';
-import { estimateEquity, describeEval, HAND_NAMES } from './poker.js';
+import { describeEval, HAND_NAMES } from './poker.js';
 import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel } from './net.js';
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
 import { renderLobby, setLobbyMsg, renderWaiting, setNetStatus, clearOverlay } from './lobby.js';
@@ -626,7 +626,6 @@ function renderHeroControls(opts) {
   else buttons.push(btn('call', `跟注 ${toCall}`, 'bg-sky-600 hover:bg-sky-500', 'ri-arrow-right-circle-line'));
   buttons.push(btn('raise', canCheck ? '下注' : '加注', canRaise ? 'bg-amber-500 text-ink hover:brightness-110' : 'bg-white/5 text-slate-500 cursor-not-allowed', 'ri-arrow-up-circle-line'));
   buttons.push(btn('allin', 'All-in', 'bg-gradient-to-r from-rose-600 to-amber-500 hover:brightness-110', 'ri-fire-line'));
-  buttons.push(btn('odds', '算胜率', 'bg-violet-600/80 hover:bg-violet-600', 'ri-percent-line'));
   $('actionButtons').innerHTML = buttons.join('');
 }
 
@@ -657,38 +656,6 @@ function showResultModal(res) {
   });
 }
 
-function showOddsModal() {
-  const g = currentGame();
-  if (!g) return;
-  const hero = g.players.find(p => p.isHero);
-  const known = hero ? hero.hole.filter(Boolean) : [];
-  if (known.length < 2) {
-    showModal({ title: '胜率计算', body: '<p>当前尚未发牌，无法计算胜率。</p>', actions: [{ label: '知道了', primary: true }] });
-    return;
-  }
-  const opp = Math.max(1, g.contenders().length - 1);
-  const eq = estimateEquity(known, g.community, opp, 4000);
-  const pct = (eq * 100).toFixed(1);
-  showModal({
-    title: '蒙特卡洛胜率模拟',
-    body: `<div class="space-y-3">
-      <div class="rounded-lg bg-white/5 p-3">
-        <div class="text-xs text-slate-400">你的手牌</div>
-        <div class="font-mono text-lg">${known.map(c => c.label + c.symbol).join('  ')}</div>
-      </div>
-      <div class="rounded-lg bg-white/5 p-3">
-        <div class="text-xs text-slate-400">公共牌</div>
-        <div class="font-mono text-lg">${g.community.map(c => c.label + c.symbol).join('  ') || '—'}</div>
-      </div>
-      <div class="rounded-lg bg-emerald-500/15 border border-emerald-400/40 p-3 text-center">
-        <div class="text-xs text-emerald-200">对抗 ${opp} 位对手，4000 次模拟</div>
-        <div class="text-4xl font-black text-emerald-300 mt-1">${pct}%</div>
-      </div>
-    </div>`,
-    actions: [{ label: '关闭', primary: true }]
-  });
-}
-
 // ================= 事件绑定 =================
 
 function doAction(act, amount = 0) {
@@ -713,7 +680,6 @@ function bindEvents() {
       if (session.isHost && game) game.startHand();
       return;
     }
-    if (act === 'odds') { showOddsModal(); return; }
     if (!heroOpts) return;
 
     if (act === 'raise') {
@@ -748,8 +714,6 @@ function bindEvents() {
   $('btnRules').addEventListener('click', () => {
     showModal({ title: '德州扑克规则速览', body: RULES_HTML, actions: [{ label: '知道了', primary: true }] });
   });
-
-  $('btnOdds').addEventListener('click', showOddsModal);
 
   $('btnLeave').addEventListener('click', () => {
     showModal({

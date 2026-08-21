@@ -1,5 +1,5 @@
 // UI 渲染模块：卡牌、座位、公共牌、日志、弹窗
-import { describeEval, evaluateBest, estimateEquity, preflopStrength, HAND_NAMES } from './poker.js';
+import { describeEval, evaluateBest, HAND_NAMES } from './poker.js';
 import { STAGE_LABEL } from './engine.js';
 
 const $ = id => document.getElementById(id);
@@ -70,7 +70,8 @@ function seatHTML(game, player, isHero, blinds) {
     ? player.hole.map(c => cardHTML(c, { hidden: !reveal || !c, size: isHero ? 'lg' : 'sm' })).join('')
     : `${cardHTML(null, { size: isHero ? 'lg' : 'sm' })}${cardHTML(null, { size: isHero ? 'lg' : 'sm' })}`;
 
-  const evalText = reveal && holeKnown.length >= 2 && game.community.length >= 3
+  // 仅在开牌（showCards）后才显示牌型，进行中不给玩家任何牌型提示
+  const evalText = player.showCards && holeKnown.length >= 2 && game.community.length >= 3
     ? describeEval(evaluateBest(holeKnown.concat(game.community)))
     : '';
 
@@ -93,10 +94,10 @@ function seatHTML(game, player, isHero, blinds) {
       </div>
     </div>
     <div class="flex items-center gap-2 mt-2 ${isHero ? 'md:mt-0' : ''}">${cards}</div>
-    ${isHero ? `<div class="md:flex-1 md:text-right mt-2 md:mt-0">
-        <div class="text-[11px] text-slate-400">当前牌型</div>
-        <div class="text-sm font-bold text-emerald-300 h-5">${evalText || '—'}</div>
-      </div>` : (evalText ? `<div class="text-[11px] text-emerald-300 mt-1">${evalText}</div>` : '')}
+    ${isHero ? (evalText ? `<div class="md:flex-1 md:text-right mt-2 md:mt-0">
+        <div class="text-[11px] text-slate-400">开牌牌型</div>
+        <div class="text-sm font-bold text-emerald-300 h-5">${evalText}</div>
+      </div>` : '') : (evalText ? `<div class="text-[11px] text-emerald-300 mt-1">${evalText}</div>` : '')}
     ${winner ? `<div class="text-emerald-300 text-xs font-bold mt-1">+${player.winAmount}</div>` : ''}
   </div>`;
 }
@@ -153,8 +154,6 @@ function renderStats(game) {
     </div>`).join('');
 }
 
-let equityCache = { key: '', value: 0 };
-
 function renderStrength(game) {
   const hero = heroOf(game);
   const panel = $('strengthPanel');
@@ -165,57 +164,22 @@ function renderStrength(game) {
     return;
   }
 
-  const key = heroHole.map(c => c.id).join('') + '|' + game.community.map(c => c.id).join('');
-  let equity;
-  if (equityCache.key === key) {
-    equity = equityCache.value;
-  } else {
-    const opp = Math.max(1, game.contenders().length - 1);
-    equity = game.community.length === 0
-      ? 0.2 + preflopStrength(heroHole) * 0.65
-      : estimateEquity(heroHole, game.community, opp, 1500);
-    equityCache = { key, value: equity };
-  }
-
-  const ev = game.community.length >= 3 ? evaluateBest(heroHole.concat(game.community)) : null;
-  const pct = Math.round(equity * 100);
-  $('handStrengthTag').textContent = ev ? ev.name : '起手牌';
-
-  const potOdds = (() => {
-    const toCall = Math.max(0, game.currentBet - hero.bet);
-    if (toCall <= 0) return 0;
-    return Math.round(toCall / (game.pot + toCall) * 100);
-  })();
-
-  const barColor = pct >= 60 ? 'bg-emerald-500' : pct >= 35 ? 'bg-amber-500' : 'bg-rose-500';
+  $('handStrengthTag').textContent = STAGE_LABEL[game.stage] || '进行中';
 
   panel.innerHTML = `
-    <div>
-      <div class="flex justify-between text-xs mb-1"><span class="text-slate-400">预估胜率</span><span class="font-mono font-bold text-white">${pct}%</span></div>
-      <div class="h-2.5 rounded-full bg-white/10 overflow-hidden"><div class="h-full ${barColor} transition-all duration-500" style="width:${pct}%"></div></div>
+    <div class="rounded-lg bg-white/5 p-3">
+      <div class="text-xs text-slate-400 mb-1">我的手牌</div>
+      <div class="font-mono text-lg font-bold">${heroHole.map(c => c.label + c.symbol).join('  ')}</div>
     </div>
-    <div>
-      <div class="flex justify-between text-xs mb-1"><span class="text-slate-400">底池赔率（需胜率）</span><span class="font-mono font-bold text-white">${potOdds}%</span></div>
-      <div class="h-2.5 rounded-full bg-white/10 overflow-hidden"><div class="h-full bg-sky-500 transition-all duration-500" style="width:${potOdds}%"></div></div>
+    <div class="rounded-lg bg-white/5 p-3">
+      <div class="text-xs text-slate-400 mb-1">公共牌</div>
+      <div class="font-mono text-lg">${game.community.filter(Boolean).map(c => c.label + c.symbol).join('  ') || '—'}</div>
     </div>
-    <div class="grid grid-cols-2 gap-2 text-xs pt-1">
-<div class="rounded-lg bg-white/5 p-2"><div class="text-slate-400">我的手牌</div><div class="font-bold">${heroHole.map(c => c.label + c.symbol).join(' ')}</div></div>
-      <div class="rounded-lg bg-white/5 p-2"><div class="text-slate-400">成手牌型</div><div class="font-bold text-emerald-300">${ev ? describeEval(ev) : '等待翻牌'}</div></div>
+    <div class="grid grid-cols-2 gap-2 text-xs">
+      <div class="rounded-lg bg-white/5 p-2"><div class="text-slate-400">底池</div><div class="font-mono font-bold text-gold">${game.pot}</div></div>
+      <div class="rounded-lg bg-white/5 p-2"><div class="text-slate-400">我的筹码</div><div class="font-mono font-bold">${hero.stack}</div></div>
     </div>
-    <div class="rounded-lg bg-white/5 p-2 text-xs">
-      <div class="text-slate-400 mb-1">决策建议</div>
-      <div class="font-bold ${equity * 100 > potOdds + 8 ? 'text-emerald-300' : equity * 100 > potOdds ? 'text-amber-300' : 'text-rose-300'}">
-        ${suggestText(equity * 100, potOdds)}
-      </div>
-    </div>`;
-}
-
-function suggestText(eq, odds) {
-  if (odds === 0) return eq > 62 ? '牌力占优，建议主动下注施压' : eq > 40 ? '可以过牌控池，观察对手' : '牌力偏弱，建议过牌';
-  if (eq > odds + 15) return '胜率显著高于赔率，建议跟注或加注';
-  if (eq > odds + 3) return '略有优势，可以跟注';
-  if (eq > odds - 5) return '边缘情况，谨慎跟注或弃牌';
-  return '赔率不划算，建议弃牌';
+    <p class="text-[11px] text-slate-500 leading-relaxed">牌桌不提供任何胜率或决策提示，一切全凭你自己的判断。</p>`;
 }
 
 function renderRecord(game) {
@@ -277,4 +241,4 @@ export function showModal({ title, body, actions = [] }) {
   });
 }
 
-export function resetEquityCache() { equityCache = { key: '', value: 0 }; }
+export function resetEquityCache() { /* 已移除胜率计算，保留空实现以兼容调用方 */ }
