@@ -22,6 +22,8 @@ export function serializeGame(game, room) {
     bigBlind: game.bigBlind,
     smallBlind: game.smallBlind,
     dealerIndex: game.dealerIndex,
+    sbSeatId: game.sbSeatId != null ? game.sbSeatId : -1,
+    bbSeatId: game.bbSeatId != null ? game.bbSeatId : -1,
     activeIndex: game.activeIndex,
     community: game.community.map(cardToJSON),
     players: game.players.map(p => ({
@@ -97,6 +99,8 @@ export function buildViewModel(state, mySeatId, myClientId) {
     bigBlind: state.bigBlind,
     smallBlind: state.smallBlind,
     dealerIndex: state.dealerIndex,
+    sbSeatId: state.sbSeatId != null ? state.sbSeatId : -1,
+    bbSeatId: state.bbSeatId != null ? state.bbSeatId : -1,
     activeIndex: state.activeIndex,
     community: (state.community || []).filter(Boolean),
     players,

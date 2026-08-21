@@ -13,10 +13,15 @@ export const STAGE_LABEL = {
   over: '本局结束'
 };
 
+export const MAX_SEATS = 6;
+
 const AI_PROFILES = [
   { name: '铁面老张', style: 'tight', avatar: '🧔', desc: '紧凶型，只玩好牌但下手极重' },
   { name: '疯狂莉莉', style: 'loose', avatar: '👩‍🎤', desc: '松散型，爱诈唬，牌局节奏快' },
-  { name: '算牌博士', style: 'balanced', avatar: '👨‍🔬', desc: '均衡型，依赖概率精准决策' }
+  { name: '算牌博士', style: 'balanced', avatar: '👨‍🔬', desc: '均衡型，依赖概率精准决策' },
+  { name: '石佛老陈', style: 'tight', avatar: '🧙', desc: '岩石型，极度保守，出手必是大牌' },
+  { name: '赌狗阿飞', style: 'loose', avatar: '🤠', desc: '莽夫型，动辄全下，毫无耐心' },
+  { name: '教授王', style: 'balanced', avatar: '👨‍🏫', desc: '学院派，擅长读牌与控池' }
 ];
 
 export class PokerGame {
@@ -46,23 +51,28 @@ export class PokerGame {
   }
 
   initPlayers() {
-    if (this.seats && this.seats.length) {
-      // 联机模式：按座位表建人，真人座位带 owner，空位用 AI 补
-      let aiCursor = 0;
-      this.players = this.seats.map((seat, idx) => {
-        if (seat.type === 'human') {
-          return {
-            id: idx,
-            name: seat.name || `玩家${idx + 1}`,
-            isHero: idx === this.heroSeatId,
-            avatar: seat.avatar || '🙂',
-            style: 'hero',
-            desc: '真人玩家',
-            seatOwner: seat.owner || null,
-            isAI: false,
-            stack: this.startingStack
-          };
-        }
+    const seats = (this.seats && this.seats.length)
+      ? this.seats
+      : [{ type: 'human', owner: 'local', name: '你', avatar: '🙂' },
+         { type: 'ai' }, { type: 'ai' }, { type: 'ai' }];
+
+    let aiCursor = 0;
+    this.players = seats.map((seat, idx) => {
+      if (seat.type === 'human' && seat.owner) {
+        return {
+          id: idx,
+          name: seat.name || `玩家${idx + 1}`,
+          isHero: idx === this.heroSeatId,
+          avatar: seat.avatar || '🙂',
+          style: 'hero',
+          desc: '真人玩家',
+          seatOwner: seat.owner,
+          isAI: false,
+          empty: false,
+          stack: seat.stack != null ? seat.stack : this.startingStack
+        };
+      }
+      if (seat.type === 'ai') {
         const prof = AI_PROFILES[aiCursor % AI_PROFILES.length];
         aiCursor++;
         return {
@@ -74,20 +84,30 @@ export class PokerGame {
           desc: prof.desc,
           seatOwner: null,
           isAI: true,
-          stack: this.startingStack
+          empty: false,
+          stack: seat.stack != null ? seat.stack : this.startingStack
         };
-      });
-    } else {
-      this.players = [
-        { id: 0, name: '你', isHero: true, avatar: '🙂', style: 'hero', desc: '玩家本人', isAI: false, stack: this.startingStack },
-        ...AI_PROFILES.map((p, i) => ({ id: i + 1, name: p.name, isHero: false, avatar: p.avatar, style: p.style, desc: p.desc, isAI: true, stack: this.startingStack }))
-      ];
-    }
+      }
+      // 空座位：不参与牌局，等牌局间隙有人坐下
+      return {
+        id: idx,
+        name: '空位',
+        isHero: false,
+        avatar: '⬜',
+        style: 'balanced',
+        desc: '虚位以待',
+        seatOwner: null,
+        isAI: false,
+        empty: true,
+        stack: 0
+      };
+    });
+
     this.players.forEach(p => {
       p.hole = [];
       p.bet = 0;
       p.totalBet = 0;
-      p.folded = false;
+      p.folded = p.empty;
       p.allIn = false;
       p.acted = false;
       p.lastAction = '';
@@ -95,7 +115,9 @@ export class PokerGame {
       p.eval = null;
       p.winAmount = 0;
     });
-    this.dealerIndex = Math.floor(Math.random() * this.players.length);
+    if (this.dealerIndex == null) {
+      this.dealerIndex = Math.floor(Math.random() * this.players.length);
+    }
   }
 
   resetTableState() {
@@ -118,17 +140,20 @@ export class PokerGame {
     this.emit('log', entry);
   }
 
-  livePlayers() { return this.players.filter(p => !p.folded); }
-  contenders() { return this.players.filter(p => !p.folded); }
-  actionable() { return this.players.filter(p => !p.folded && !p.allIn && p.stack > 0); }
+  livePlayers() { return this.players.filter(p => !p.empty && !p.folded); }
+  contenders() { return this.players.filter(p => !p.empty && !p.folded); }
+  actionable() { return this.players.filter(p => !p.empty && !p.folded && !p.allIn && p.stack > 0); }
 
-  bustedCount() { return this.players.filter(p => p.stack <= 0).length; }
+  bustedCount() { return this.players.filter(p => !p.empty && p.stack <= 0).length; }
+
+  // 参与本手的座位：非空且有筹码
+  seatedPlayers() { return this.players.filter(p => !p.empty && p.stack > 0); }
 
   startHand() {
-    const alive = this.players.filter(p => p.stack > 0);
+    const alive = this.seatedPlayers();
     if (alive.length < 2) {
       this.stage = 'over';
-      this.log('游戏结束：可用玩家不足两人。', 'warn');
+      this.log('人数不足两人，无法开局。', 'warn');
       this.emit('gameOver', { hero: this.heroPlayer() });
       this.emit('update');
       return;
@@ -142,40 +167,57 @@ export class PokerGame {
       p.hole = [];
       p.bet = 0;
       p.totalBet = 0;
-      p.folded = p.stack <= 0;
+      p.folded = p.empty || p.stack <= 0;
       p.allIn = false;
       p.acted = false;
-      p.lastAction = p.stack <= 0 ? '淘汰' : '';
+      p.lastAction = p.empty ? '' : (p.stack <= 0 ? '淘汰' : '');
       p.showCards = false;
       p.eval = null;
       p.winAmount = 0;
     });
 
-    // 移动庄家按钮到下一个有筹码玩家
-    do { this.dealerIndex = (this.dealerIndex + 1) % this.players.length; }
-    while (this.players[this.dealerIndex].stack <= 0);
+    // 庄家按钮移到下一个可参与的座位
+    for (let i = 1; i <= this.players.length; i++) {
+      const cand = this.players[(this.dealerIndex + i) % this.players.length];
+      if (!cand.empty && cand.stack > 0) { this.dealerIndex = cand.id; break; }
+    }
 
     // 发底牌
     for (let r = 0; r < 2; r++) {
       for (const p of this.players) {
-        if (p.stack > 0) p.hole.push(this.deck.pop());
+        if (!p.empty && p.stack > 0) p.hole.push(this.deck.pop());
       }
     }
 
-    const order = this.seatOrderFrom(this.dealerIndex + 1);
-    const sbPlayer = order[0];
-    const bbPlayer = order[1 % order.length];
+    const heads = alive.length === 2;
+    let sbPlayer, bbPlayer, firstToAct;
+
+    if (heads) {
+      // 单挑：庄家下小盲，翻前庄家先说话，翻后大盲先说话
+      const order = this.seatOrderFrom(this.dealerIndex);
+      sbPlayer = order[0];
+      bbPlayer = order[1];
+      firstToAct = sbPlayer;
+    } else {
+      // 三人以上：庄家左手位小盲，其次大盲，UTG（大盲左手）先说话
+      const order = this.seatOrderFrom(this.dealerIndex + 1);
+      sbPlayer = order[0];
+      bbPlayer = order[1];
+      firstToAct = order[2 % order.length];
+    }
+
     this.postBlind(sbPlayer, this.smallBlind, '小盲');
     this.postBlind(bbPlayer, this.bigBlind, '大盲');
     this.currentBet = this.bigBlind;
     this.minRaise = this.bigBlind;
     this.lastAggressor = bbPlayer.id;
+    this.bbSeatId = bbPlayer.id;
+    this.sbSeatId = sbPlayer.id;
 
-    this.log(`—— 第 ${this.handNo} 手开始 · 庄家：${this.players[this.dealerIndex].name} ——`, 'stage');
+    this.log(`—— 第 ${this.handNo} 手开始 · ${alive.length} 人 · 庄家：${this.players[this.dealerIndex].name} ——`, 'stage');
     this.log(`盲注 ${this.smallBlind}/${this.bigBlind}`, 'info');
 
-    const startIdx = order.length > 2 ? 2 % order.length : 0;
-    this.activeIndex = order[startIdx].id;
+    this.activeIndex = firstToAct.id;
     this.emit('handStart');
     this.emit('update');
     this.advance();
@@ -183,9 +225,10 @@ export class PokerGame {
 
   seatOrderFrom(startIdx) {
     const res = [];
-    for (let i = 0; i < this.players.length; i++) {
-      const p = this.players[(startIdx + i) % this.players.length];
-      if (p.stack > 0) res.push(p);
+    const n = this.players.length;
+    for (let i = 0; i < n; i++) {
+      const p = this.players[((startIdx % n) + n + i) % n];
+      if (!p.empty && p.stack > 0) res.push(p);
     }
     return res;
   }
@@ -201,11 +244,20 @@ export class PokerGame {
   }
 
   nextActor(fromId) {
-    for (let i = 1; i <= this.players.length; i++) {
-      const p = this.players[(fromId + i) % this.players.length];
-      if (!p.folded && !p.allIn && p.stack > 0) return p.id;
+    const n = this.players.length;
+    const base = ((fromId % n) + n) % n;
+    for (let i = 1; i <= n; i++) {
+      const p = this.players[(base + i) % n];
+      if (!p.empty && !p.folded && !p.allIn && p.stack > 0) return p.id;
     }
     return -1;
+  }
+
+  // nextActor 只会从锚点向前搜索，所以想让某个座位成为首位行动者，
+  // 需要把锚点放在它的前一位
+  prevActorAnchor(seatId) {
+    const n = this.players.length;
+    return ((seatId % n) + n - 1) % n;
   }
 
   bettingRoundComplete() {
@@ -362,7 +414,13 @@ export class PokerGame {
       setTimeout(() => this.nextStage(), 900);
       return;
     }
-    this.activeIndex = this.nextActor(this.dealerIndex);
+    // 翻后行动顺序：三人以上从庄家左手位（小盲）开始；
+    // 单挑时庄家兼小盲，翻后必须由大盲先说话，因此从大盲位起算
+    const heads = this.seatedPlayers().length === 2;
+    const anchor = heads && this.bbSeatId != null
+      ? this.prevActorAnchor(this.bbSeatId)
+      : this.dealerIndex;
+    this.activeIndex = this.nextActor(anchor);
     setTimeout(() => this.advance(), 800);
   }
 
@@ -382,7 +440,7 @@ export class PokerGame {
   }
 
   buildSidePots() {
-    const involved = this.players.filter(p => p.totalBet > 0);
+    const involved = this.players.filter(p => !p.empty && p.totalBet > 0);
     const levels = [...new Set(involved.map(p => p.totalBet))].sort((a, b) => a - b);
     const pots = [];
     let prev = 0;
@@ -455,5 +513,36 @@ export class PokerGame {
     if (hero && hero.stack <= 0) {
       setTimeout(() => this.emit('gameOver', { hero }), 400);
     }
+  }
+
+  // 牌局间隙生效：按新座位表重建玩家，已在座者保留筹码，新入座者拿起始筹码
+  applySeats(newSeats) {
+    if (this.stage !== 'idle' && this.stage !== 'over') return false;
+    const prevByOwner = new Map();
+    const prevBySeat = new Map();
+    this.players.forEach(p => {
+      if (p.seatOwner) prevByOwner.set(p.seatOwner, p);
+      prevBySeat.set(p.id, p);
+    });
+
+    this.seats = newSeats.map((seat, idx) => {
+      if (seat.type === 'human' && seat.owner) {
+        const old = prevByOwner.get(seat.owner);
+        return { ...seat, stack: old && old.stack > 0 ? old.stack : this.startingStack };
+      }
+      if (seat.type === 'ai') {
+        const old = prevBySeat.get(idx);
+        const keep = old && old.isAI && old.stack > 0 ? old.stack : this.startingStack;
+        return { ...seat, stack: keep };
+      }
+      return { type: 'empty' };
+    });
+
+    const keepDealer = this.dealerIndex;
+    this.initPlayers();
+    this.dealerIndex = keepDealer;
+    this.resetTableState();
+    this.emit('update');
+    return true;
   }
 }

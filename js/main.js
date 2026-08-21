@@ -1,5 +1,5 @@
 // 主入口：大厅 → 联机对局装配
-import { PokerGame } from './engine.js';
+import { PokerGame, MAX_SEATS } from './engine.js';
 import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache } from './ui.js';
 import { estimateEquity, describeEval, HAND_NAMES } from './poker.js';
 import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel } from './net.js';
@@ -50,6 +50,26 @@ const RULES_HTML = `
   <div>房主的浏览器负责发牌与推进牌局。若房主关闭页面，本局将无法继续。这是信任局，技术上不做底牌隔离。</div>
 </div>`;
 
+// ---------- 座位工具 ----------
+// 六人桌：0 号是房主，1 号默认开放给真人，其余先用 AI 占位，房主可在等待界面调整
+function buildInitialSeats(name, avatar) {
+  const seats = [{ type: 'human', owner: CLIENT_ID, name, avatar }];
+  seats.push({ type: 'human', owner: null, name: '', avatar: '' });
+  for (let i = 2; i < MAX_SEATS; i++) seats.push({ type: 'ai' });
+  return seats;
+}
+
+function humanCount(seats) {
+  return (seats || []).filter(s => s.type === 'human' && s.owner).length;
+}
+
+// 找一个可坐的位置：优先空着的真人位，其次把 AI 位挤掉
+function findOpenSeat(seats) {
+  let idx = seats.findIndex(s => s.type === 'human' && !s.owner);
+  if (idx >= 0) return idx;
+  return seats.findIndex(s => s.type === 'ai');
+}
+
 // ---------- 当前渲染对象 ----------
 function currentGame() {
   return session.isHost ? game : viewModel;
@@ -79,10 +99,7 @@ async function handleCreate({ name, avatar, code }) {
   session.myName = name;
   session.myAvatar = avatar;
   session.code = code;
-  session.seats = [
-    { type: 'human', owner: CLIENT_ID, name, avatar },
-    { type: 'human', owner: null, name: '', avatar: '' }
-  ];
+  session.seats = buildInitialSeats(name, avatar);
 
   const initial = {
     v: 1,
@@ -138,9 +155,9 @@ async function handleJoin({ name, avatar, code }) {
   const existing = seats.findIndex(s => s.owner === CLIENT_ID);
   let seatIdx = existing;
   if (seatIdx < 0) {
-    seatIdx = seats.findIndex(s => s.type === 'human' && !s.owner);
+    seatIdx = findOpenSeat(seats);
     if (seatIdx < 0) {
-      setLobbyMsg('房间已满', 'error');
+      setLobbyMsg('六个座位都坐满了，等有人离开再试', 'error');
       return;
     }
     seats[seatIdx] = { type: 'human', owner: CLIENT_ID, name, avatar };
@@ -218,8 +235,10 @@ function showWaiting() {
     code: session.code,
     seats: session.seats,
     isHost: session.isHost,
+    mySeatId: session.mySeatId,
     onStart: hostStartGame,
-    onLeave: leaveRoom
+    onLeave: leaveRoom,
+    onToggleSeat: hostToggleSeat
   });
   setNetStatus('实时连接中…');
 }
@@ -233,6 +252,34 @@ function leaveRoom() {
   session.seats = [];
   clearLog();
   showLobby();
+}
+
+// 房主在等待界面切换某个座位：AI 占位 ↔ 开放给真人
+async function hostToggleSeat(idx) {
+  if (!session.isHost) return;
+  const seats = session.seats.map(s => ({ ...s }));
+  const seat = seats[idx];
+  if (!seat || (seat.type === 'human' && seat.owner)) return;
+  seats[idx] = seat.type === 'ai'
+    ? { type: 'human', owner: null, name: '', avatar: '' }
+    : { type: 'ai' };
+  session.seats = seats;
+  showWaiting();
+  await pushSeats();
+}
+
+// 把座位表单独同步出去（等待阶段用，不含牌局数据）
+async function pushSeats() {
+  const state = session.remoteState || {};
+  const next = { ...state, seats: session.seats, v: (session.lastVersion || 0) + 1, ts: Date.now() };
+  session.lastVersion = next.v;
+  session.remoteState = next;
+  try {
+    await updateRoomState(session.code, next);
+  } catch (err) {
+    console.error('[sync] 座位同步失败', err);
+    setNetStatus('座位同步失败，请检查网络', 'error');
+  }
 }
 
 // ================= Realtime 通道 =================
@@ -273,6 +320,7 @@ function handleRemoteRow(row) {
     if (state.seats) {
       session.seats = state.seats;
       if (session.phase === 'waiting') showWaiting();
+      else if (session.phase === 'playing') applySeatChange();
     }
     if (state.action) consumeClientAction(state.action);
     return;
@@ -293,13 +341,39 @@ function handleRemoteRow(row) {
 // ================= 房主端 =================
 
 function hostStartGame() {
-  const filled = session.seats.filter(s => s.type === 'human' && s.owner).length;
-  if (filled < 2) return;
+  // 六人桌至少要有房主自己，人数不够由 AI 补齐
+  if (humanCount(session.seats) < 1) return;
 
   clearOverlay(overlay());
   session.phase = 'playing';
   clearLog();
   initHostGame();
+}
+
+// 座位变更只在牌局间隙生效，手牌进行中先挂起
+let seatChangePending = false;
+
+function applySeatChange() {
+  if (!game || !session.isHost) return;
+  const idle = game.stage === 'idle' || game.stage === 'over';
+  if (!idle) {
+    if (!seatChangePending) {
+      seatChangePending = true;
+      const waiting = humanCount(session.seats);
+      game.log(`有玩家请求入座，将在本手结束后生效（当前真人 ${waiting} 位）`, 'info');
+    }
+    return;
+  }
+  seatChangePending = false;
+  const before = game.players.filter(p => !p.isAI).map(p => p.seatOwner).join(',');
+  if (game.applySeats(session.seats)) {
+    const after = game.players.filter(p => !p.isAI).map(p => p.seatOwner).join(',');
+    if (before !== after) {
+      game.log(`座位已更新 · 真人 ${humanCount(session.seats)} 位，其余由 AI 补齐`, 'stage');
+    }
+    renderTable(game);
+    pushState();
+  }
 }
 
 function initHostGame() {
@@ -328,8 +402,10 @@ function initHostGame() {
     heroOpts = null;
     renderEndControls();
     const meWin = res.winners.find(w => w.player.isHero);
-    setTableMsg(meWin ? `你赢得 ${meWin.amount} 筹码！` : `${res.winners[0]?.player.name || '对手'} 赢下本局`);
+    setTableMsg(meWin ? `你赢得 ${meWin.amount} 筹码！` : `${res.winners.map(w => w.player.name).join('、') || '其他玩家'} 赢下本局`);
     showResultModal(res);
+    // 牌局间隙：让等待中的新玩家入座
+    if (seatChangePending) setTimeout(() => applySeatChange(), 300);
   });
   game.on('gameOver', ({ hero }) => {
     showModal({
@@ -408,6 +484,16 @@ function enterGameAsClient(state) {
   // 同步日志：只补新增部分
   syncClientLogs(state.logs || []);
 
+  // 本手已在进行，但我的座位还没被房主纳入牌局：等下一手
+  const mySeat = (state.players || []).find(p => p.id === session.mySeatId);
+  const seatedIn = mySeat && mySeat.seatOwner === CLIENT_ID;
+  if (!seatedIn && state.stage !== 'idle' && state.stage !== 'over') {
+    heroOpts = null;
+    renderWaitControls('本手进行中，你将在下一手入座…');
+    setTableMsg('等待下一手入座');
+    return;
+  }
+
   const stage = state.stage;
   if (stage === 'over') {
     heroOpts = null;
@@ -430,8 +516,8 @@ function enterGameAsClient(state) {
   } else {
     const actor = (state.players || []).find(p => p.id === state.activeIndex);
     heroOpts = null;
-    renderWaitControls(`等待 ${actor ? actor.name : '对手'} 行动…`);
-    setTableMsg(actor ? `等待 ${actor.name}` : '等待对手');
+    renderWaitControls(`等待 ${actor ? actor.name : '其他玩家'} 行动…`);
+    setTableMsg(actor ? `等待 ${actor.name}` : '等待其他玩家');
   }
 }
 

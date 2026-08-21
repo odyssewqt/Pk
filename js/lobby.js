@@ -1,4 +1,4 @@
-// 大厅界面：建房 / 加入房间 / 等待对手
+// 大厅界面：建房 / 加入房间 / 六人桌座位配置
 import { makeRoomCode } from './net.js';
 
 const AVATARS = ['🙂', '😎', '🐯', '🦊', '🐼', '🐧', '🦁', '🐵'];
@@ -9,8 +9,8 @@ export function renderLobby(root, { onCreate, onJoin, defaultName }) {
       <div class="w-full max-w-2xl">
         <div class="text-center mb-6">
           <div class="w-16 h-16 rounded-2xl chip-ring mx-auto flex items-center justify-center text-ink font-black text-2xl shadow-lg mb-3">♠</div>
-          <h2 class="text-2xl font-black">联机德州扑克</h2>
-          <p class="text-sm text-slate-400 mt-1">两人对局 · 一人建房，另一人输房间码加入</p>
+          <h2 class="text-2xl font-black">联机德州扑克 · 六人桌</h2>
+          <p class="text-sm text-slate-400 mt-1">最多 6 人同桌 · 人数不够由 AI 补位</p>
         </div>
 
         <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-5 mb-4">
@@ -26,7 +26,7 @@ export function renderLobby(root, { onCreate, onJoin, defaultName }) {
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-5 flex flex-col">
             <h3 class="font-bold text-gold mb-2"><i class="ri-add-circle-line mr-1"></i>创建房间</h3>
-            <p class="text-xs text-slate-400 flex-1 mb-4">你将成为房主，负责发牌与推进牌局。房间码生成后发给朋友。</p>
+            <p class="text-xs text-slate-400 flex-1 mb-4">你将成为房主，负责发牌与推进牌局。建房后可自由配置每个座位是留给真人还是交给 AI。</p>
             <button id="btnCreateRoom" class="w-full px-4 py-3 rounded-xl bg-gold text-ink font-bold hover:brightness-110 transition">
               生成房间码并建房
             </button>
@@ -88,10 +88,57 @@ export function setLobbyMsg(text, type = 'info') {
   el.textContent = text;
 }
 
-export function renderWaiting(root, { code, seats, isHost, onStart, onLeave }) {
-  const filled = seats.filter(s => s.type === 'human' && s.owner).length;
+const SEAT_ROLE = ['庄家位起点', '座位 2', '座位 3', '座位 4', '座位 5', '座位 6'];
+
+function seatRowHTML(seat, i, isHost, mySeatId) {
+  const mine = i === mySeatId;
+  const isAI = seat.type === 'ai';
+  const taken = seat.type === 'human' && seat.owner;
+
+  let border, icon, label, badge, badgeCls;
+  if (taken) {
+    border = mine ? 'border-gold/60 bg-gold/10' : 'border-emerald-400/40 bg-emerald-500/10';
+    icon = seat.avatar || '🙂';
+    label = seat.name + (mine ? '（你）' : '');
+    badge = i === 0 ? '房主' : '真人';
+    badgeCls = mine ? 'text-gold' : 'text-emerald-300';
+  } else if (isAI) {
+    border = 'border-violet-400/40 bg-violet-500/10';
+    icon = '🤖';
+    label = 'AI 电脑玩家';
+    badge = 'AI 补位';
+    badgeCls = 'text-violet-300';
+  } else {
+    border = 'border-white/10 bg-white/5';
+    icon = '⬜';
+    label = '空位 · 等待加入';
+    badge = SEAT_ROLE[i] || `座位 ${i + 1}`;
+    badgeCls = 'text-slate-500';
+  }
+
+  // 房主可以把非真人座位在「空位 / AI」之间切换；0 号位是房主自己，不可动
+  const toggle = (isHost && !taken && i !== 0)
+    ? `<button data-toggle="${i}" class="px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${isAI ? 'bg-violet-500/25 text-violet-200 hover:bg-violet-500/40' : 'bg-white/10 text-slate-300 hover:bg-white/20'}">
+         ${isAI ? '改为空位' : '放 AI'}
+       </button>`
+    : '';
+
+  return `<div class="flex items-center gap-3 rounded-xl border ${border} p-3">
+      <span class="text-xl w-7 text-center shrink-0">${icon}</span>
+      <span class="flex-1 font-bold text-sm truncate">${label}</span>
+      <span class="text-xs ${badgeCls} shrink-0">${badge}</span>
+      ${toggle}
+    </div>`;
+}
+
+export function renderWaiting(root, { code, seats, isHost, mySeatId, onStart, onLeave, onToggleSeat }) {
+  const humans = seats.filter(s => s.type === 'human' && s.owner).length;
+  const ais = seats.filter(s => s.type === 'ai').length;
+  const total = humans + ais;
+  const canStart = total >= 2;
+
   root.innerHTML = `
-    <div class="fixed inset-0 z-40 flex items-center justify-center bg-ink/95 backdrop-blur p-4">
+    <div class="fixed inset-0 z-40 flex items-center justify-center bg-ink/95 backdrop-blur p-4 overflow-y-auto">
       <div class="w-full max-w-lg text-center">
         <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-6">
           <div class="text-xs text-slate-400 mb-2">房间码 · 发给你的朋友</div>
@@ -103,21 +150,20 @@ export function renderWaiting(root, { code, seats, isHost, onStart, onLeave }) {
           </div>
           <div id="copyHint" class="text-xs text-emerald-300 h-4 mb-4"></div>
 
-          <div class="space-y-2 mb-5 text-left">
-            ${seats.map((s, i) => `
-              <div class="flex items-center gap-3 rounded-xl border ${s.owner ? 'border-emerald-400/40 bg-emerald-500/10' : 'border-white/10 bg-white/5'} p-3">
-                <span class="text-xl">${s.owner ? (s.avatar || '🙂') : '⬜'}</span>
-                <span class="flex-1 font-bold text-sm">${s.owner ? s.name : '等待加入…'}</span>
-                <span class="text-xs ${s.owner ? 'text-emerald-300' : 'text-slate-500'}">${i === 0 ? '房主' : '座位 2'}</span>
-              </div>`).join('')}
+          <div class="space-y-2 mb-4 text-left">
+            ${seats.map((s, i) => seatRowHTML(s, i, isHost, mySeatId)).join('')}
           </div>
 
-          <div class="text-sm text-slate-400 mb-4">${filled}/2 人就位${filled < 2 ? '，等对方进来后即可开局' : '，可以开始了'}</div>
+          <div class="text-sm text-slate-400 mb-4">
+            真人 <b class="text-emerald-300">${humans}</b> · AI <b class="text-violet-300">${ais}</b> · 共 <b class="text-gold">${total}</b>/6 人上桌
+            ${canStart ? '' : '<div class="text-xs text-rose-300 mt-1">至少需要 2 人（可用 AI 补位）</div>'}
+          </div>
 
           ${isHost
-      ? `<button id="btnStartGame" class="w-full px-4 py-3 rounded-xl font-bold transition ${filled >= 2 ? 'bg-gold text-ink hover:brightness-110' : 'bg-white/5 text-slate-500 cursor-not-allowed'}">
-                ${filled >= 2 ? '开始牌局' : '等待对手加入…'}
-              </button>`
+      ? `<button id="btnStartGame" class="w-full px-4 py-3 rounded-xl font-bold transition ${canStart ? 'bg-gold text-ink hover:brightness-110' : 'bg-white/5 text-slate-500 cursor-not-allowed'}">
+                ${canStart ? '开始牌局' : '人数不足'}
+              </button>
+              <div class="text-[11px] text-slate-500 mt-2">开局后仍可加入，新玩家会在当前这手结束后上桌</div>`
       : `<div class="w-full px-4 py-3 rounded-xl bg-white/5 text-slate-400 text-sm">已就座，等房主开局</div>`}
 
           <button id="btnLeaveRoom" class="mt-3 text-xs text-slate-500 hover:text-rose-300 transition">离开房间</button>
@@ -139,8 +185,14 @@ export function renderWaiting(root, { code, seats, isHost, onStart, onLeave }) {
     }, 1800);
   });
 
+  if (isHost && onToggleSeat) {
+    root.querySelectorAll('[data-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => onToggleSeat(Number(btn.dataset.toggle)));
+    });
+  }
+
   const startBtn = root.querySelector('#btnStartGame');
-  if (startBtn && filled >= 2) startBtn.addEventListener('click', onStart);
+  if (startBtn && canStart) startBtn.addEventListener('click', onStart);
   root.querySelector('#btnLeaveRoom').addEventListener('click', onLeave);
 }
 

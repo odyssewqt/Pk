@@ -30,14 +30,37 @@ const STYLE_TAG = {
   tight: { text: '紧凶', cls: 'bg-sky-500/20 text-sky-300 border-sky-400/40' },
   loose: { text: '松散', cls: 'bg-rose-500/20 text-rose-300 border-rose-400/40' },
   balanced: { text: '均衡', cls: 'bg-violet-500/20 text-violet-300 border-violet-400/40' },
-  hero: { text: '玩家', cls: 'bg-amber-500/20 text-amber-300 border-amber-400/40' }
+  maniac: { text: '疯狂', cls: 'bg-orange-500/20 text-orange-300 border-orange-400/40' },
+  rock: { text: '岩石', cls: 'bg-teal-500/20 text-teal-300 border-teal-400/40' },
+  station: { text: '跟注站', cls: 'bg-lime-500/20 text-lime-300 border-lime-400/40' },
+  hero: { text: '我', cls: 'bg-amber-500/20 text-amber-300 border-amber-400/40' },
+  human: { text: '真人', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40' }
 };
 
-function seatHTML(game, player, isHero) {
+// 计算小盲/大盲座位，用于座位角标。与引擎保持同一套规则：
+// 两人时庄家即小盲，三人以上庄家左手位为小盲
+function blindSeats(game) {
+  // 引擎已记录权威盲注座位时直接采用，避免UI重复推导产生偏差
+  if (game.sbSeatId != null && game.bbSeatId != null && game.sbSeatId >= 0) {
+    return { sb: game.sbSeatId, bb: game.bbSeatId };
+  }
+  const alive = [];
+  for (let i = 0; i < game.players.length; i++) {
+    const p = game.players[(game.dealerIndex + i) % game.players.length];
+    if (p.stack > 0 || p.totalBet > 0) alive.push(p.id);
+  }
+  if (alive.length < 2) return { sb: -1, bb: -1 };
+  if (alive.length === 2) return { sb: alive[0], bb: alive[1] };
+  return { sb: alive[1], bb: alive[2] };
+}
+
+function seatHTML(game, player, isHero, blinds) {
   const active = game.activeIndex === player.id && game.stage !== 'over' && game.stage !== 'idle';
   const isDealer = game.dealerIndex === player.id;
+  const isSB = blinds && blinds.sb === player.id;
+  const isBB = blinds && blinds.bb === player.id;
   const busted = player.stack <= 0 && player.folded;
-  const tag = STYLE_TAG[player.style] || STYLE_TAG.balanced;
+  const tag = player.isAI ? (STYLE_TAG[player.style] || STYLE_TAG.balanced) : (isHero ? STYLE_TAG.hero : STYLE_TAG.human);
   const reveal = player.showCards || isHero;
   const winner = player.winAmount > 0;
   const holeKnown = player.hole.filter(Boolean);
@@ -59,6 +82,8 @@ function seatHTML(game, player, isHero) {
           <span class="font-bold text-sm truncate">${player.name}</span>
           <span class="px-1.5 py-0.5 rounded border text-[10px] ${tag.cls}">${tag.text}</span>
           ${isDealer ? '<span class="w-5 h-5 rounded-full bg-white text-ink text-[10px] font-black flex items-center justify-center">D</span>' : ''}
+          ${isSB ? '<span class="w-5 h-5 rounded-full bg-sky-400 text-ink text-[10px] font-black flex items-center justify-center">SB</span>' : ''}
+          ${isBB ? '<span class="w-5 h-5 rounded-full bg-amber-400 text-ink text-[10px] font-black flex items-center justify-center">BB</span>' : ''}
         </div>
         <div class="flex items-center gap-2 mt-0.5">
           <span class="text-gold font-mono font-bold text-sm">${player.stack}</span>
@@ -82,9 +107,19 @@ function heroOf(game) {
 
 export function renderTable(game) {
   const hero = heroOf(game);
-  const opps = game.players.filter(p => !p.isHero);
-  $('opponentSeats').innerHTML = opps.map(p => seatHTML(game, p, false)).join('');
-  $('heroSeat').innerHTML = seatHTML(game, hero, true);
+  const blinds = blindSeats(game);
+  // 按座位号顺时针排列对手，从本人下一个座位开始，视觉上更贴近真实牌桌
+  const total = game.players.length;
+  const opps = [];
+  for (let i = 1; i < total; i++) {
+    const p = game.players[(hero.id + i) % total];
+    if (p && !p.isHero) opps.push(p);
+  }
+  const cols = opps.length <= 2 ? 'sm:grid-cols-2' : opps.length <= 4 ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-3 lg:grid-cols-5';
+  const wrap = $('opponentSeats');
+  wrap.className = `grid grid-cols-1 ${cols} gap-3`;
+  wrap.innerHTML = opps.map(p => seatHTML(game, p, false, blinds)).join('');
+  $('heroSeat').innerHTML = seatHTML(game, hero, true, blinds);
 
   $('potDisplay').textContent = game.pot;
   $('stageBadge').textContent = STAGE_LABEL[game.stage] || game.stage;
@@ -102,9 +137,12 @@ export function renderTable(game) {
 
 function renderStats(game) {
   const hero = heroOf(game);
+  const humans = game.players.filter(p => !p.isAI).length;
+  const alive = game.players.filter(p => p.stack > 0 || p.totalBet > 0).length;
   const items = [
     { label: '手数', value: game.handNo, icon: 'ri-layout-grid-line' },
     { label: '我的筹码', value: hero.stack, icon: 'ri-coin-line' },
+    { label: '在座', value: `${alive}人（真人${humans}）`, icon: 'ri-group-line' },
     { label: '盲注', value: `${game.smallBlind}/${game.bigBlind}`, icon: 'ri-focus-3-line' }
   ];
   $('statBar').innerHTML = items.map(i => `
