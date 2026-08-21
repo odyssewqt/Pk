@@ -208,6 +208,7 @@ export function settlementHTML(settlement) {
     </div>
     <div class="space-y-2">${rows}</div>
     <div class="mt-3 text-[11px]">${check}</div>`;
+}
 
 function renderStats(game) {
   const hero = heroOf(game);
