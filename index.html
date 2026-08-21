@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>德州扑克 · Texas Hold'em</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        felt: '#0b6b3a',
+        feltDark: '#064a28',
+        gold: '#e6b84e',
+        ink: '#0f172a'
+      },
+      keyframes: {
+        dealIn: { '0%': { transform: 'translateY(-40px) scale(.7) rotate(-12deg)', opacity: '0' }, '100%': { transform: 'translateY(0) scale(1) rotate(0)', opacity: '1' } },
+        flipIn: { '0%': { transform: 'rotateY(90deg)', opacity: '0' }, '100%': { transform: 'rotateY(0)', opacity: '1' } },
+        chipPop: { '0%': { transform: 'scale(.4)', opacity: '0' }, '60%': { transform: 'scale(1.15)' }, '100%': { transform: 'scale(1)', opacity: '1' } },
+        glowPulse: { '0%,100%': { boxShadow: '0 0 0 0 rgba(230,184,78,.7)' }, '50%': { boxShadow: '0 0 0 10px rgba(230,184,78,0)' } },
+        floatUp: { '0%': { transform: 'translateY(6px)', opacity: '0' }, '100%': { transform: 'translateY(-22px)', opacity: '1' } }
+      },
+      animation: {
+        dealIn: 'dealIn .38s cubic-bezier(.2,.9,.3,1.2) both',
+        flipIn: 'flipIn .35s ease both',
+        chipPop: 'chipPop .3s ease both',
+        glowPulse: 'glowPulse 1.6s infinite',
+        floatUp: 'floatUp 1s ease forwards'
+      }
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif; }
+  .table-felt {
+    background:
+      radial-gradient(ellipse at 50% 40%, #12855c 0%, #0b6b3a 45%, #064a28 100%);
+    box-shadow: inset 0 0 80px rgba(0,0,0,.55), 0 20px 50px rgba(0,0,0,.5);
+  }
+  .card-face {
+    background: linear-gradient(160deg,#ffffff 0%,#f3f4f6 100%);
+    box-shadow: 0 4px 10px rgba(0,0,0,.35);
+  }
+  .card-back {
+    background:
+      repeating-linear-gradient(45deg, #1e3a8a 0 6px, #1d4ed8 6px 12px);
+    box-shadow: 0 4px 10px rgba(0,0,0,.35);
+  }
+  .chip-ring { background: conic-gradient(#e6b84e 0 25%, #b8860b 25% 50%, #e6b84e 50% 75%, #b8860b 75% 100%); }
+  .scroll-thin::-webkit-scrollbar { width: 6px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,.25); border-radius: 4px; }
+  .seat-active { animation: glowPulse 1.6s infinite; }
+  input[type=range] { -webkit-appearance: none; height: 6px; border-radius: 6px; background: linear-gradient(90deg,#e6b84e,#b8860b); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #fff; border: 3px solid #e6b84e; cursor: pointer; }
+</style>
+</head>
+<body class="min-h-screen bg-ink text-slate-100">
+
+<div class="min-h-screen flex flex-col">
+
+  <!-- 顶部栏 -->
+  <header class="border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900">
+    <div class="w-[95%] max-w-[1800px] mx-auto px-2 py-3 flex flex-wrap items-center gap-3">
+      <div class="flex items-center gap-2">
+        <div class="w-10 h-10 rounded-xl chip-ring flex items-center justify-center text-ink font-black text-lg shadow-lg">♠</div>
+        <div>
+          <h1 class="text-xl font-black tracking-wide">德州扑克 <span class="text-gold">Texas Hold'em</span></h1>
+          <p class="text-[11px] text-slate-400">无限注 · 联机双人对局</p>
+        </div>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <div id="statBar" class="flex flex-wrap items-center gap-2 text-xs"></div>
+
+      <div class="flex items-center gap-2">
+        <span id="netBadge" class="px-2 py-1 rounded text-[11px] bg-white/10 text-slate-300"></span>
+        <button id="btnRules" class="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition text-sm"><i class="ri-book-2-line mr-1"></i>规则</button>
+        <button id="btnOdds" class="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition text-sm"><i class="ri-percent-line mr-1"></i>胜率</button>
+        <button id="btnLeave" class="px-3 py-2 rounded-lg bg-rose-600/80 hover:bg-rose-600 transition text-sm"><i class="ri-logout-box-line mr-1"></i>离开</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 w-[95%] max-w-[1800px] mx-auto px-2 py-4 grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-4">
+
+    <!-- 牌桌区 -->
+    <section class="flex flex-col gap-4">
+
+      <div class="table-felt rounded-[40px] border-[10px] border-amber-900/70 relative p-4 md:p-6 min-h-[520px] flex flex-col">
+
+        <!-- 对手座位 -->
+        <div id="opponentSeats" class="grid grid-cols-1 sm:grid-cols-3 gap-3"></div>
+
+        <!-- 中央区域 -->
+        <div class="flex-1 flex flex-col items-center justify-center gap-4 py-6">
+          <div class="flex flex-col items-center gap-1">
+            <div class="text-[11px] uppercase tracking-[.25em] text-emerald-200/70">Pot 底池</div>
+            <div id="potDisplay" class="text-3xl md:text-4xl font-black text-gold drop-shadow">0</div>
+            <div id="stageBadge" class="mt-1 px-3 py-1 rounded-full bg-black/40 border border-white/15 text-xs tracking-widest">等待开始</div>
+          </div>
+          <div id="communityCards" class="flex items-center justify-center gap-2 md:gap-3 min-h-[104px]"></div>
+          <div id="tableMsg" class="text-sm text-emerald-100/80 h-5"></div>
+        </div>
+
+        <!-- 玩家座位 -->
+        <div id="heroSeat" class="mt-auto"></div>
+      </div>
+
+      <!-- 操作区 -->
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-4">
+        <div class="flex flex-wrap items-center gap-3">
+          <div id="actionHint" class="text-sm text-slate-300 min-w-[180px]"></div>
+          <div class="flex-1 min-w-[220px] flex items-center gap-3">
+            <input id="raiseSlider" type="range" min="0" max="100" value="0" class="flex-1" disabled>
+            <div class="w-24 text-right font-mono text-gold text-lg" id="raiseAmount">0</div>
+          </div>
+          <div id="quickBets" class="flex flex-wrap gap-2"></div>
+        </div>
+        <div id="actionButtons" class="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-2"></div>
+      </div>
+    </section>
+
+    <!-- 侧边栏 -->
+    <aside class="flex flex-col gap-4">
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
+        <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+          <h2 class="font-bold text-sm"><i class="ri-bar-chart-2-line mr-1 text-gold"></i>本局手牌强度</h2>
+          <span id="handStrengthTag" class="text-xs px-2 py-0.5 rounded bg-white/10">—</span>
+        </div>
+        <div class="p-4 space-y-3" id="strengthPanel"></div>
+      </div>
+
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden flex-1 min-h-[240px] flex flex-col">
+        <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+          <h2 class="font-bold text-sm"><i class="ri-file-list-3-line mr-1 text-gold"></i>牌局日志</h2>
+          <button id="btnClearLog" class="text-xs text-slate-400 hover:text-white">清空</button>
+        </div>
+        <div id="logList" class="p-3 space-y-1.5 overflow-y-auto scroll-thin max-h-[320px] text-xs"></div>
+      </div>
+
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
+        <div class="px-4 py-3 border-b border-white/10">
+          <h2 class="font-bold text-sm"><i class="ri-trophy-line mr-1 text-gold"></i>战绩统计</h2>
+        </div>
+        <div id="recordPanel" class="p-4 grid grid-cols-2 gap-3 text-center"></div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="border-t border-white/10 py-4 text-center text-xs text-slate-500">
+    <p class="mb-1">德州扑克 · 仅供娱乐演示，不涉及任何真实货币</p>
+    <p>由 <a href="https://with.woa.com/" style="color: #8A2BE2;" target="_blank">With</a> 通过自然语言生成</p>
+  </footer>
+</div>
+
+<!-- 弹窗容器 -->
+<div id="modalRoot"></div>
+<!-- 大厅 / 等待覆盖层 -->
+<div id="overlayRoot"></div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
