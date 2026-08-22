@@ -218,6 +218,46 @@ export class PokerGame {
     return { ok: true, amount: amt };
   }
 
+  // 采纳客机自主写入的账本：借还不再经房主中转，房主只负责把
+  // 账目差额兑换成实际筹码，并保持权威状态与数据库一致。
+  // 只认「增量」，且借还都必须单调递增，避免旧状态回放导致重复记账。
+  adoptBank(bank) {
+    if (!bank || typeof bank !== 'object') return [];
+    if (this.stage !== 'idle' && this.stage !== 'over') return [];
+    this.syncLedger();
+    const changes = [];
+    this.players.forEach(p => {
+      if (p.empty) return;
+      const key = this.ledgerKey(p);
+      const incoming = bank[key];
+      if (!key || !incoming) return;
+      const rec = this.ledger.get(key);
+      if (!rec) return;
+      const dB = Math.floor((incoming.borrowed || 0) - rec.borrowed);
+      const dR = Math.floor((incoming.repaid || 0) - rec.repaid);
+      if (dB > 0) {
+        rec.borrowed += dB;
+        p.stack += dB;
+        changes.push({ seatId: p.id, name: p.name, type: 'borrow', amount: dB });
+        this.bankLog.push({ seatId: p.id, name: p.name, type: 'borrow', amount: dB, reason: '玩家自助', ts: Date.now() });
+        this.log(`${p.name} 从牌池借入 ${dB} · 累计借 ${rec.borrowed} / 还 ${rec.repaid} · 净欠 ${Math.max(0, rec.borrowed - rec.repaid)}`, 'bank');
+      }
+      if (dR > 0 && dR <= p.stack) {
+        rec.repaid += dR;
+        p.stack -= dR;
+        changes.push({ seatId: p.id, name: p.name, type: 'repay', amount: dR });
+        this.bankLog.push({ seatId: p.id, name: p.name, type: 'repay', amount: dR, reason: '玩家自助', ts: Date.now() });
+        this.log(`${p.name} 向牌池归还 ${dR} · 累计借 ${rec.borrowed} / 还 ${rec.repaid} · 净欠 ${Math.max(0, rec.borrowed - rec.repaid)}`, 'bank');
+      }
+    });
+    if (changes.length) {
+      this.syncLedger();
+      this.emit('bankChange', { type: 'adopt', changes });
+      this.emit('update');
+    }
+    return changes;
+  }
+
   // 本手结束后：把输光的人自动补到起始筹码线
   autoRefillBusted() {
     if (!this.isAuthority) return [];

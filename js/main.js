@@ -2,9 +2,10 @@
 import { PokerGame, MAX_SEATS } from './engine.js';
 import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache, showAmountModal, settlementHTML } from './ui.js';
 import { describeEval, HAND_NAMES } from './poker.js';
-import { getClientId, createRoom, fetchRoom, updateRoomState, RoomChannel, checkBackend } from './net.js';
+import { getClientId, createRoom, fetchRoom, updateRoomState, mutateRoomState, casRoomState, RoomChannel, checkBackend } from './net.js';
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
 import { renderLobby, setLobbyMsg, renderWaiting, setNetStatus, clearOverlay } from './lobby.js';
+import { PROTOCOL_VERSION, BUILD_LABEL, compareVersion, readStateVersion, showVersionBlocker } from './version.js';
 
 const $ = id => document.getElementById(id);
 const overlay = () => $('overlayRoot');
@@ -124,6 +125,7 @@ async function handleCreate({ name, avatar, code }) {
 
   const initial = {
     v: 1,
+    pv: PROTOCOL_VERSION,
     phase: 'waiting',
     seats: session.seats,
     hostId: CLIENT_ID,
@@ -172,6 +174,20 @@ async function handleJoin({ name, avatar, code }) {
   const state = room.state || {};
   const seats = state.seats || [];
 
+  // 版本校验必须放在写入座位之前：
+  // 旧页面与新页面对状态结构的理解不同，一旦混跑可能把账算错，
+  // 所以宁可拦在门外，也不让它进桌。
+  const cmp = compareVersion(state);
+  if (cmp !== 'same') {
+    const remote = readStateVersion(state);
+    const reason = cmp === 'client-old'
+      ? '这个房间由更新版本的页面创建，你的页面还是旧代码，直接入座可能导致筹码和账本算错。'
+      : '你的页面比这个房间更新，说明房主那边还在跑旧代码。请让房主先刷新页面并重新建房。';
+    setLobbyMsg('页面版本不一致，已阻止入座', 'error');
+    showVersionBlocker({ mine: PROTOCOL_VERSION, remote, reason });
+    return;
+  }
+
   // 若本客户端已在座（刷新重连），直接回到原座位
   const existing = seats.findIndex(s => s.owner === CLIENT_ID);
   let seatIdx = existing;
@@ -192,7 +208,7 @@ async function handleJoin({ name, avatar, code }) {
   session.seats = seats;
   session.lastVersion = state.v || 0;
 
-  const next = { ...state, seats, v: (state.v || 0) + 1, ts: Date.now() };
+  const next = { ...state, seats, pv: PROTOCOL_VERSION, v: (state.v || 0) + 1, ts: Date.now() };
 
   // 先建立订阅再写入座位，否则房主可能收不到本次入座事件
   setLobbyMsg('正在建立实时连接…');
@@ -328,12 +344,31 @@ function handleRemoteRow(row) {
   const state = row.state;
   if (!state) return;
 
-  // 版本回退保护：忽略比本地更旧的状态
-  if (state.v && state.v < session.lastVersion) {
+  // 运行中版本检测：房间的协议版本一旦与本页面不符，
+  // 立刻停止处理任何后续状态并弹出刷新提示。
+  // 放在最前面是刻意的——不能让一条不兼容的状态先把本地数据改坏。
+  if (compareVersion(state) !== 'same') {
+    const remote = readStateVersion(state);
+    console.error('[version] 协议版本不一致，已停止同步', PROTOCOL_VERSION, 'vs', remote);
+    session.channel?.close();
+    session.channel = null;
+    showVersionBlocker({
+      mine: PROTOCOL_VERSION,
+      remote,
+      reason: '房间的代码版本已经变了，为避免筹码算错，本页面已停止同步。请刷新后重新加入。'
+    });
+    return;
+  }
+
+  // 版本回退保护：忽略比本地更旧的状态。
+  // 但客机动作不参与版本自增，人多并发时可能带着相同或更小的 v 到达，
+  // 房主必须先把动作收下，否则借还请求会被当成「过期状态」直接丢掉。
+  const hasIncomingAction = !!(state.action || (Array.isArray(state.actionQueue) && state.actionQueue.length));
+  if (state.v && state.v < session.lastVersion && !(session.isHost && hasIncomingAction)) {
     console.warn('[sync] 忽略过期状态', state.v, '<', session.lastVersion);
     return;
   }
-  session.lastVersion = state.v || session.lastVersion;
+  if ((state.v || 0) >= session.lastVersion) session.lastVersion = state.v || session.lastVersion;
   session.remoteState = state;
 
   if (session.isHost) {
@@ -343,7 +378,9 @@ function handleRemoteRow(row) {
       if (session.phase === 'waiting') showWaiting();
       else if (session.phase === 'playing') applySeatChange();
     }
-    if (state.action) consumeClientAction(state.action);
+    // 借还已由客机自助写入账本，房主只需采纳差额并兑换筹码
+    if (state.bank) game.adoptBank(state.bank);
+    if (state.action || (Array.isArray(state.actionQueue) && state.actionQueue.length)) consumeActionQueue(state);
     return;
   }
 
@@ -470,7 +507,8 @@ function pushState() {
     pushPending = true;
     return;
   }
-  // 合并高频 update，避免一次动作触发多次写库
+  // 合并高频 update，避免一次动作触发多次写库。
+  // 延迟从 120ms 收敛到 40ms：原值在人多时会和网络往返叠加，点击后要等一会儿才有反应。
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(async () => {
     const state = serializeGame(game, {
@@ -478,14 +516,74 @@ function pushState() {
       phase: 'playing',
       seats: session.seats
     });
+    // 房主写整行会覆盖客机刚写的账本，这里取两边较大值合并：
+    // 借还只增不减，取 max 既不丢玩家自助记账，也不会重复计数。
+    const remoteBank = session.remoteState?.bank;
+    if (remoteBank && state.bank) {
+      Object.keys(remoteBank).forEach(k => {
+        const mine = state.bank[k] || { borrowed: 0, repaid: 0, buyIn: 0 };
+        const theirs = remoteBank[k] || {};
+        state.bank[k] = {
+          borrowed: Math.max(mine.borrowed || 0, theirs.borrowed || 0),
+          repaid: Math.max(mine.repaid || 0, theirs.repaid || 0),
+          buyIn: mine.buyIn || theirs.buyIn || 0
+        };
+      });
+    }
+    // 队列内的请求已被房主消费，随权威状态一并清空，
+    // 否则队列会持续变大，载荷越来越沉，人多时明显卡顿。
+    state.actionQueue = [];
+    state.action = null;
     session.lastVersion = state.v;
     try {
-      await updateRoomState(session.code, state);
+      // 房主也走 CAS：若客机在此期间写入了账本，本次写入会失败，
+      // 此时重新采纳最新账本再推一次，保证谁的记账都不会丢。
+      const won = await casRoomState(session.code, state, session.lastVersion - 1);
+      if (!won) {
+        const row = await fetchRoom(session.code);
+        if (row?.state?.bank) {
+          game.adoptBank(row.state.bank);
+          session.remoteState = row.state;
+          session.lastVersion = row.state.v || session.lastVersion;
+        }
+        pushPending = true;
+        setTimeout(flushPendingPush, 80);
+        return;
+      }
     } catch (err) {
       console.error('[sync] 写入失败', err);
       handleNetStatus('error');
     }
-  }, 120);
+  }, 40);
+}
+
+// 房主侧：把队列里所有没处理过的请求按时间顺序全部消费掉。
+// 之前只读 state.action 单个字段，人多时并发写入互相覆盖，请求会静默丢失。
+function consumeActionQueue(state) {
+  if (!game || !session.isHost) return;
+  const queue = Array.isArray(state.actionQueue) && state.actionQueue.length
+    ? state.actionQueue
+    : (state.action ? [state.action] : []);
+  if (!queue.length) return;
+
+  const pending = queue
+    .filter(a => a && a.seatId !== session.mySeatId)
+    .filter(a => {
+      const rid = a.rid || `${a.seatId}:${a.ts}`;
+      if (handledBankReq.has(rid)) return false;
+      handledBankReq.add(rid);
+      return true;
+    })
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+  if (!pending.length) return;
+  // 去重集合无上限会随对局无限增长，保留最近若干条即可
+  if (handledBankReq.size > 400) {
+    const keep = [...handledBankReq].slice(-200);
+    handledBankReq.clear();
+    keep.forEach(k => handledBankReq.add(k));
+  }
+  pending.forEach(consumeClientAction);
 }
 
 function consumeClientAction(action) {
@@ -494,14 +592,12 @@ function consumeClientAction(action) {
   // 借还筹码请求：不属于下注轮，单独处理，不受行动顺序限制
   if (action.action === 'borrow' || action.action === 'repay') {
     if (action.seatId === session.mySeatId) return;
-    // 同一条请求可能随多次状态事件重复到达，按 ts 去重，避免重复记账
-    const rid = `${action.seatId}:${action.ts}`;
-    if (handledBankReq.has(rid)) return;
-    handledBankReq.add(rid);
+    // 去重已在 consumeActionQueue 统一按 rid 处理，此处不再重复拦截
     const res = action.action === 'borrow'
       ? game.borrow(action.seatId, action.amount || 0)
       : game.repay(action.seatId, action.amount || 0);
     if (!res.ok) game.log(`${game.players[action.seatId]?.name || '玩家'} 的${action.action === 'borrow' ? '借码' : '还码'}请求被拒绝：${res.msg}`, 'warn');
+    // 成功时引擎会 emit('update')，已绑定 pushState，无需重复写库
     return;
   }
 
@@ -534,7 +630,14 @@ function bankIdle() {
 
 function handleBorrow() {
   const me = mySeatPlayer();
-  if (!me) return;
+  if (!me) {
+    showModal({
+      title: '还没上桌',
+      body: '<p>牌池借贷需要先进入房间并落座。请先建房或用房间码加入，坐下后即可向牌池借筹码。</p>',
+      actions: [{ label: '知道了', primary: true }]
+    });
+    return;
+  }
   if (!bankIdle()) {
     showModal({ title: '暂时无法借码', body: '<p>牌局进行中不能改动筹码，等本手结束后再借。</p>', actions: [{ label: '知道了', primary: true }] });
     return;
@@ -552,8 +655,7 @@ function handleBorrow() {
         const res = game.borrow(session.mySeatId, amt);
         if (!res.ok) showModal({ title: '借码失败', body: `<p>${res.msg}</p>`, actions: [{ label: '知道了', primary: true }] });
       } else {
-        sendClientAction('borrow', amt);
-        setTableMsg(`已申请借入 ${amt}，等待同步…`);
+        submitBankOp('borrow', amt);
       }
     }
   });
@@ -561,7 +663,14 @@ function handleBorrow() {
 
 function handleRepay() {
   const me = mySeatPlayer();
-  if (!me) return;
+  if (!me) {
+    showModal({
+      title: '还没上桌',
+      body: '<p>牌池借贷需要先进入房间并落座。请先建房或用房间码加入，坐下后即可归还筹码。</p>',
+      actions: [{ label: '知道了', primary: true }]
+    });
+    return;
+  }
   if (!bankIdle()) {
     showModal({ title: '暂时无法还码', body: '<p>牌局进行中不能改动筹码，等本手结束后再还。</p>', actions: [{ label: '知道了', primary: true }] });
     return;
@@ -588,11 +697,72 @@ function handleRepay() {
         const res = game.repay(session.mySeatId, amt);
         if (!res.ok) showModal({ title: '还码失败', body: `<p>${res.msg}</p>`, actions: [{ label: '知道了', primary: true }] });
       } else {
-        sendClientAction('repay', amt);
-        setTableMsg(`已申请归还 ${amt}，等待同步…`);
+        submitBankOp('repay', amt);
       }
     }
   });
+}
+
+// 客机侧：借还筹码直接写进自己的账本条目，不再经房主中转。
+// 借贷本质是「改自己的两个数字」，不涉及牌桌顺序，无需权威端裁决。
+// mutateRoomState 用 CAS 保证并发安全：抢输就重读最新状态再合并，
+// 因此人再多也不会互相覆盖，房主掉线同样能借还。
+async function submitBankOp(kind, amt) {
+  const me = mySeatPlayer();
+  if (!me) return;
+  const key = me.ledgerKey || (me.seatOwner ? `owner:${me.seatOwner}` : `seat:${me.id}`);
+  const label = kind === 'borrow' ? '借入' : '归还';
+  setTableMsg(`正在${label} ${amt}…`);
+
+  try {
+    const out = await mutateRoomState(session.code, state => {
+      // 牌局进行中禁止改筹码，否则破坏当前下注轮的边池计算
+      if (state.stage && state.stage !== 'idle' && state.stage !== 'over') {
+        throw new Error('牌局进行中无法改动筹码，请等本手结束');
+      }
+      const bank = { ...(state.bank || {}) };
+      const rec = { ...(bank[key] || { borrowed: 0, repaid: 0 }) };
+      const seat = (state.players || []).find(p => p.ledgerKey === key || p.id === me.id);
+      const stack = seat ? seat.stack : me.stack;
+
+      if (kind === 'borrow') {
+        rec.borrowed += amt;
+      } else {
+        const debt = Math.max(0, rec.borrowed - rec.repaid);
+        if (debt <= 0) throw new Error('你没有欠牌池筹码');
+        if (amt > debt) throw new Error(`最多只需归还 ${debt}`);
+        if (amt > stack) throw new Error(`手上只有 ${stack}，不够归还 ${amt}`);
+        rec.repaid += amt;
+      }
+      rec.ts = Date.now();
+      bank[key] = rec;
+      state.bank = bank;
+      // 记一笔流水，供房主与其他客机显示
+      const feed = Array.isArray(state.bankFeed) ? state.bankFeed.slice(-30) : [];
+      feed.push({ key, seatId: me.id, name: me.name, type: kind, amount: amt, ts: Date.now() });
+      state.bankFeed = feed;
+      return state;
+    });
+
+    if (!out.ok) {
+      setTableMsg('');
+      showModal({
+        title: `${label}失败`,
+        body: `<p>${out.msg}</p><p class="text-xs text-slate-400">同时操作的人较多，稍等一下再试即可。</p>`,
+        actions: [{ label: '知道了', primary: true }]
+      });
+      return;
+    }
+    setTableMsg(`已${label} ${amt}`);
+    setTimeout(() => setTableMsg(''), 1500);
+  } catch (err) {
+    setTableMsg('');
+    showModal({
+      title: `${label}失败`,
+      body: `<p>${err.message || '写入失败，请重试'}</p>`,
+      actions: [{ label: '知道了', primary: true }]
+    });
+  }
 }
 
 // 房主结算：算清每个人的真实输赢
@@ -688,20 +858,28 @@ function syncClientLogs(logs) {
 async function sendClientAction(action, amount = 0) {
   const state = session.remoteState;
   if (!state) return;
+  const req = {
+    seatId: session.mySeatId,
+    action,
+    amount,
+    handNo: state.handNo,
+    by: CLIENT_ID,
+    ts: Date.now(),
+    rid: `${CLIENT_ID}:${session.mySeatId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+  };
+  // 关键：动作走「追加队列」而不是单个字段。
+  // 多人同时操作时，单字段写入会被后一个人覆盖，房主永远读不到被覆盖的那条，
+  // 表现就是借还筹码「点了没反应」。队列保留所有未处理请求。
+  const queue = Array.isArray(state.actionQueue) ? state.actionQueue.slice(-40) : [];
+  queue.push(req);
   const next = {
     ...state,
-    v: (state.v || 0) + 1,
-    action: {
-      seatId: session.mySeatId,
-      action,
-      amount,
-      handNo: state.handNo,
-      by: CLIENT_ID,
-      ts: Date.now()
-    },
+    // 不再自增 v。客机各自基于陈旧 remoteState 计算会算出相同的 v，
+    // 反而触发房主的版本回退保护把请求当成过期状态丢掉。
+    actionQueue: queue,
+    action: req,
     ts: Date.now()
   };
-  session.lastVersion = next.v;
   try {
     await updateRoomState(session.code, next);
   } catch (err) {
@@ -897,6 +1075,11 @@ function bindEvents() {
 }
 
 bindEvents();
+
+// 页脚展示版本号：出问题时让大家互相报一句版本号就能定位
+const buildEl = $('buildLabel');
+if (buildEl) buildEl.textContent = BUILD_LABEL;
+
 showLobby();
 
 // 启动自检：提前暴露后端不可达问题，而不是等到点建房才报错

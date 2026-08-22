@@ -1,5 +1,6 @@
 // 状态序列化：把引擎状态压成可写入 jsonb 的纯数据，以及反向恢复
 // 房主写全量状态；客机只读不算
+import { PROTOCOL_VERSION } from './version.js';
 
 // 房主写入的状态里，未开牌玩家的底牌需要遮罩，否则任何人按 F12 就能看到
 // 只有 showCards（开牌阶段）或该牌属于接收者本人时才下发真实牌面
@@ -10,12 +11,21 @@ function maskedHole(p, revealAll) {
 }
 
 export function serializeGame(game, room) {
+  // 把权威账本导出为普通对象，客机借还时直接改自己那一项
+  const bank = {};
+  if (game.ledger && typeof game.ledger.forEach === 'function') {
+    game.ledger.forEach((rec, key) => {
+      bank[key] = { borrowed: rec.borrowed || 0, repaid: rec.repaid || 0, buyIn: rec.buyIn || 0 };
+    });
+  }
   return {
     v: (room?.v || 0) + 1,
+    pv: PROTOCOL_VERSION,
     phase: room?.phase || 'playing',
     seats: room.seats,
     handNo: game.handNo,
     stage: game.stage,
+    bank,
     pot: game.pot,
     currentBet: game.currentBet,
     minRaise: game.minRaise,
@@ -46,6 +56,7 @@ export function serializeGame(game, room) {
       borrowed: p.borrowed || 0,
       repaid: p.repaid || 0,
       buyIn: p.buyIn || 0,
+      ledgerKey: p.ledgerKey || null,
       hole: maskedHole(p, false),
       // 每个座位的真实底牌单独放一份，按 owner 分发
       holeFor: p.seatOwner ? { owner: p.seatOwner, cards: p.hole.map(cardToJSON) } : null,
@@ -73,6 +84,7 @@ function cardToJSON(c) {
 // 打开控制台读 room.state 就能看到别人的牌。UI 层不显示，但技术上防不住。
 // 真正的隔离需要把发牌搬到 Postgres 函数里，用 RLS 限制每人只能查自己那两张。
 export function buildViewModel(state, mySeatId, myClientId) {
+  const bank = state.bank || {};
   const players = (state.players || []).map(p => {
     const mine = p.id === mySeatId;
     let hole;
@@ -86,13 +98,20 @@ export function buildViewModel(state, mySeatId, myClientId) {
       // 只保留张数，不给牌面，让 UI 画牌背
       hole = (p.hole || []).map(() => null).filter(() => true);
     }
+    // 账本以 bank 里的较大值为准：客机自助借还会先写 bank，
+    // 房主稍后才把差额兑换成 stack 并回推，这样中间态也能立刻看到。
+    const key = p.ledgerKey || (p.seatOwner ? `owner:${p.seatOwner}` : `seat:${p.id}`);
+    const rec = bank[key] || {};
+    const borrowed = Math.max(p.borrowed || 0, rec.borrowed || 0);
+    const repaid = Math.max(p.repaid || 0, rec.repaid || 0);
     return {
       ...p,
       isHero: mine,
       hole,
-      borrowed: p.borrowed || 0,
-      repaid: p.repaid || 0,
-      buyIn: p.buyIn || 0,
+      borrowed,
+      repaid,
+      buyIn: p.buyIn || rec.buyIn || 0,
+      ledgerKey: key,
       eval: p.evalName ? { name: p.evalName } : null
     };
   });

@@ -86,6 +86,51 @@ export async function updateRoomState(code, state) {
   return true;
 }
 
+// 条件写入：只有当数据库里的 state->>'v' 仍等于 expectedV 时才写成功。
+// 这是乐观并发控制（CAS）。原来的 updateRoomState 是无条件整行覆盖，
+// 多人同时写会互相把对方的数据抹掉；加上这个条件后，
+// 抢输的一方会拿到 0 行更新，从而知道要重新读取并合并再试。
+export async function casRoomState(code, state, expectedV) {
+  const url = `${REST}/rooms?code=eq.${encodeURIComponent(code)}`
+    + `&state->>v=eq.${encodeURIComponent(String(expectedV))}`;
+  const res = await safeFetch(url, {
+    method: 'PATCH',
+    headers: { ...HEADERS, 'Prefer': 'return=representation' },
+    body: JSON.stringify({ state, updated_at: new Date().toISOString() })
+  }, '同步状态请求发送失败');
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`写入状态失败 ${res.status}: ${txt}`);
+  }
+  const rows = await res.json();
+  // 返回 0 行 = 版本已被别人改掉，本次写入未生效
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+// 读-改-写重试：把 mutate 的修改安全地合入最新状态。
+// mutate(state) 收到的是数据库里的最新状态，返回修改后的状态。
+// 冲突时自动重读重试，因此并发的借还请求不会再互相覆盖或丢失。
+export async function mutateRoomState(code, mutate, attempts = 6) {
+  for (let i = 0; i < attempts; i++) {
+    const row = await fetchRoom(code);
+    if (!row || !row.state) throw new Error('房间不存在或状态为空');
+    const cur = row.state;
+    const expectedV = cur.v || 0;
+    const next = mutate({ ...cur });
+    if (!next) return { ok: true, state: cur, skipped: true };
+    // 兜底：pv 是版本校验的依据，任何写入都不能把它丢掉，
+    // 否则会被其他客户端误判成「版本不一致」而集体卡住。
+    if (next.pv == null && cur.pv != null) next.pv = cur.pv;
+    next.v = expectedV + 1;
+    next.ts = Date.now();
+    const won = await casRoomState(code, next, expectedV);
+    if (won) return { ok: true, state: next };
+    // 输给了并发写入，退避后重读最新状态再合并
+    await new Promise(r => setTimeout(r, 60 + Math.random() * 140 + i * 60));
+  }
+  return { ok: false, msg: '并发冲突，请重试' };
+}
+
 // 自检：确认后端可达，返回 true/false 并在控制台打印详情
 export async function checkBackend() {
   try {
