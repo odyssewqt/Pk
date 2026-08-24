@@ -2,8 +2,19 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <title>德州扑克 · Texas Hold'em</title>
+
+<!-- PWA：装到桌面后以独立窗口全屏运行 -->
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#0f172a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="德州扑克">
+<link rel="icon" type="image/svg+xml" href="./icon.svg">
+<link rel="apple-touch-icon" href="./icon.svg">
+
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css">
 <script>
@@ -56,6 +67,29 @@ tailwind.config = {
   .seat-active { animation: glowPulse 1.6s infinite; }
   input[type=range] { -webkit-appearance: none; height: 6px; border-radius: 6px; background: linear-gradient(90deg,#e6b84e,#b8860b); }
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #fff; border: 3px solid #e6b84e; cursor: pointer; }
+
+  /* ===== 移动端 / PWA 适配 ===== */
+
+  /* iOS 全屏运行时，顶部状态栏与底部 Home 指示条会覆盖内容，
+     统一用 env(safe-area-inset-*) 留出安全区。桌面浏览器下这些值为 0，无副作用。 */
+  .safe-top { padding-top: env(safe-area-inset-top, 0px); }
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .safe-x { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
+
+  /* 底部标签栏存在时给 body 垫高，避免最后一屏内容被遮住 */
+  body.pb-tabbar { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
+
+  /* 操作按钮在窄屏要够大，够到才点得准 */
+  @media (max-width: 640px) {
+    #actionButtons button { min-height: 48px; font-size: 13px; }
+    #communityCards { min-height: 84px; }
+  }
+
+  /* 独立应用形态下禁用长按选中与双击缩放，避免误触打断牌局操作 */
+  @media (display-mode: standalone) {
+    body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior-y: none; }
+    #chatInput, input, textarea { -webkit-user-select: text; user-select: text; }
+  }
 </style>
 </head>
 <body class="min-h-screen bg-ink text-slate-100">
@@ -63,7 +97,7 @@ tailwind.config = {
 <div class="min-h-screen flex flex-col">
 
   <!-- 顶部栏 -->
-  <header class="border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900">
+  <header class="border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 safe-top safe-x sticky top-0 z-30">
     <div class="w-[95%] max-w-[1800px] mx-auto px-2 py-3 flex flex-wrap items-center gap-3">
       <div class="flex items-center gap-2">
         <div class="w-10 h-10 rounded-xl chip-ring flex items-center justify-center text-ink font-black text-lg shadow-lg">♠</div>
@@ -75,9 +109,9 @@ tailwind.config = {
 
       <div class="flex-1"></div>
 
-      <div id="statBar" class="flex flex-wrap items-center gap-2 text-xs"></div>
+      <div id="statBar" class="hidden flex-wrap items-center gap-2 text-xs"></div>
 
-      <div class="flex items-center gap-2">
+      <div id="roomActions" class="hidden items-center gap-2">
         <span id="netBadge" class="px-2 py-1 rounded text-[11px] bg-white/10 text-slate-300"></span>
         <button id="btnSettle" class="hidden px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 transition text-sm font-bold"><i class="ri-calculator-line mr-1"></i>结算</button>
         <button id="btnRules" class="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition text-sm"><i class="ri-book-2-line mr-1"></i>规则</button>
@@ -86,10 +120,22 @@ tailwind.config = {
     </div>
   </header>
 
-  <main class="flex-1 w-[95%] max-w-[1800px] mx-auto px-2 py-4 grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-4">
+  <!-- 安装提示条：可关闭，装好后自动不再出现 -->
+  <div id="installBar" class="hidden safe-x bg-gradient-to-r from-violet-600/90 to-indigo-600/90 border-b border-white/10">
+    <div class="w-[95%] max-w-[1800px] mx-auto px-2 py-2 flex items-center gap-3">
+      <i class="ri-download-cloud-2-line text-xl shrink-0"></i>
+      <p id="installText" class="flex-1 text-xs leading-snug">把牌桌装到桌面，像 App 一样打开</p>
+      <button id="btnInstall" class="px-3 py-1.5 rounded-lg bg-white text-ink text-xs font-bold hover:brightness-95 transition shrink-0">安装</button>
+      <button id="btnInstallClose" class="w-7 h-7 rounded-lg bg-black/20 hover:bg-black/40 transition flex items-center justify-center shrink-0" aria-label="不再提示">
+        <i class="ri-close-line"></i>
+      </button>
+    </div>
+  </div>
+
+  <main class="flex-1 w-[95%] max-w-[1800px] mx-auto px-2 py-4 grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-4 safe-x">
 
     <!-- 牌桌区 -->
-    <section class="flex flex-col gap-4">
+    <section id="tableSection" class="flex flex-col gap-4">
 
       <div class="table-felt rounded-[40px] border-[10px] border-amber-900/70 relative p-4 md:p-6 min-h-[520px] flex flex-col">
 
@@ -112,7 +158,7 @@ tailwind.config = {
       </div>
 
       <!-- 操作区 -->
-      <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-4">
+      <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-4 mb-2 xl:mb-0">
         <div class="flex flex-wrap items-center gap-3">
           <div id="actionHint" class="text-sm text-slate-300 min-w-[180px]"></div>
           <div class="flex-1 min-w-[220px] flex items-center gap-3">
@@ -126,16 +172,16 @@ tailwind.config = {
     </section>
 
     <!-- 侧边栏 -->
-    <aside class="flex flex-col gap-4">
-      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
+    <aside id="sidePanels" class="flex flex-col gap-4">
+      <div id="panelInfo" class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
         <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
-          <h2 class="font-bold text-sm"><i class="ri-poker-hearts-line mr-1 text-gold"></i>本局信息</h2>
-          <span id="handStrengthTag" class="text-xs px-2 py-0.5 rounded bg-white/10">—</span>
+          <h2 class="font-bold text-sm"><i class="ri-focus-3-line mr-1 text-gold"></i>本局信息</h2>
+          <span id="handStrengthTag" class="text-[11px] px-2 py-0.5 rounded bg-white/10">—</span>
         </div>
         <div class="p-4 space-y-3" id="strengthPanel"></div>
       </div>
 
-      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
+      <div id="panelBank" class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
         <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
           <h2 class="font-bold text-sm"><i class="ri-bank-line mr-1 text-gold"></i>牌池借贷</h2>
           <span class="text-[11px] px-2 py-0.5 rounded bg-violet-500/20 text-violet-300">无限筹码</span>
@@ -151,12 +197,33 @@ tailwind.config = {
         </div>
       </div>
 
-      <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden flex-1 min-h-[240px] flex flex-col">
+      <div id="panelLog" class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden flex-1 min-h-[240px] flex flex-col">
         <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
           <h2 class="font-bold text-sm"><i class="ri-file-list-3-line mr-1 text-gold"></i>牌局日志</h2>
           <button id="btnClearLog" class="text-xs text-slate-400 hover:text-white">清空</button>
         </div>
         <div id="logList" class="p-3 space-y-1.5 overflow-y-auto scroll-thin max-h-[320px] text-xs"></div>
+      </div>
+
+      <!-- 聊天面板 -->
+      <div id="chatPanel" class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden flex flex-col">
+        <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+          <h2 class="font-bold text-sm">
+            <i class="ri-chat-3-line mr-1 text-gold"></i>牌桌聊天
+            <span id="chatUnread" class="hidden ml-1 px-1.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] align-top"></span>
+          </h2>
+          <span class="text-[11px] text-slate-500">同房可见</span>
+        </div>
+        <div id="chatList" class="p-3 space-y-2 overflow-y-auto scroll-thin h-[240px] text-xs"></div>
+        <div class="relative border-t border-white/10">
+          <div id="chatEmojiPicker" class="hidden absolute bottom-full left-0 right-0 mb-1 mx-2 rounded-xl bg-slate-800 border border-white/15 shadow-2xl z-20"></div>
+          <form id="chatForm" class="p-2 flex items-center gap-2">
+            <button id="btnChatEmoji" type="button" class="w-9 h-9 shrink-0 rounded-lg bg-white/10 hover:bg-white/20 transition flex items-center justify-center text-lg disabled:opacity-40 disabled:cursor-not-allowed"><i class="ri-emotion-line"></i></button>
+            <input id="chatInput" type="text" maxlength="120" autocomplete="off" placeholder="进入房间后可聊天"
+              class="flex-1 min-w-0 px-3 py-2 rounded-lg bg-black/40 border border-white/15 text-xs outline-none focus:border-gold/60 transition disabled:opacity-40">
+            <button id="btnChatSend" type="submit" class="px-3 h-9 shrink-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 transition text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed">发送</button>
+          </form>
+        </div>
       </div>
 
       <div class="rounded-2xl bg-slate-900/80 border border-white/10 overflow-hidden">
@@ -180,6 +247,38 @@ tailwind.config = {
 <!-- 大厅 / 等待覆盖层 -->
 <div id="overlayRoot"></div>
 
-<script type="module" src="./js/main.js?v=8"></script>
+<!-- 移动端底部标签栏：窄屏显示，桌面端自动隐藏 -->
+<nav id="mobileTabs" class="hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur border-t border-white/10 safe-bottom xl:hidden"></nav>
+
+<!-- iOS 添加到主屏幕引导 -->
+<div id="iosGuide" class="hidden fixed inset-0 z-[90] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+  <div class="w-full max-w-sm rounded-2xl bg-slate-900 border border-white/15 p-5 shadow-2xl">
+    <div class="flex items-center gap-2 mb-4">
+      <div class="w-10 h-10 rounded-xl chip-ring flex items-center justify-center text-ink font-black">♠</div>
+      <h3 class="font-black text-lg">装到主屏幕</h3>
+    </div>
+    <ol class="space-y-3 text-sm text-slate-300">
+      <li class="flex gap-2">
+        <span class="w-5 h-5 shrink-0 rounded-full bg-gold text-ink text-xs font-bold flex items-center justify-center">1</span>
+        <span>用 <b class="text-white">Safari</b> 打开本页（微信或其他 App 内置浏览器无法安装）</span>
+      </li>
+      <li class="flex gap-2">
+        <span class="w-5 h-5 shrink-0 rounded-full bg-gold text-ink text-xs font-bold flex items-center justify-center">2</span>
+        <span>点底部中间的 <i class="ri-share-box-line text-gold"></i> <b class="text-white">分享</b> 按钮</span>
+      </li>
+      <li class="flex gap-2">
+        <span class="w-5 h-5 shrink-0 rounded-full bg-gold text-ink text-xs font-bold flex items-center justify-center">3</span>
+        <span>向下滑，选 <b class="text-white">添加到主屏幕</b></span>
+      </li>
+      <li class="flex gap-2">
+        <span class="w-5 h-5 shrink-0 rounded-full bg-gold text-ink text-xs font-bold flex items-center justify-center">4</span>
+        <span>回到桌面，点新图标即可全屏打开，没有地址栏</span>
+      </li>
+    </ol>
+    <button id="btnIosGuideClose" class="mt-5 w-full px-4 py-3 rounded-xl bg-gold text-ink font-bold hover:brightness-110 transition">知道了</button>
+  </div>
+</div>
+
+<script type="module" src="./js/main.js?v=9"></script>
 </body>
 </html>

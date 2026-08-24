@@ -147,8 +147,11 @@ export class PokerGame {
       }
       let rec = this.ledger.get(key);
       if (!rec) {
-        // 首次建账：当前筹码即本人的初始买入
-        rec = { borrowed: 0, repaid: 0, buyIn: p.stack > 0 ? p.stack : this.startingStack };
+        // 首次建账：当前筹码即本人的初始买入。
+        // stack 为 0 时兜底必须是 0，不能填 startingStack——否则等着被
+        // autoRefillBusted 补码的人会把那 2000 记成「自带买入」，
+        // 借款被抵消，净欠归零，牌池账面对不上。
+        rec = { borrowed: 0, repaid: 0, buyIn: p.stack > 0 ? p.stack : 0 };
         this.ledger.set(key, rec);
       }
       p.ledgerKey = key;
@@ -284,7 +287,9 @@ export class PokerGame {
   settleTable() {
     this.syncLedger();
     const rows = this.players.filter(p => !p.empty).map(p => {
-      const rec = this.ledgerOf(p) || { borrowed: 0, repaid: 0, buyIn: this.startingStack };
+      // 兜底记录的 buyIn 同样必须是 0：填 startingStack 会凭空抵掉
+      // 一笔借款，让净盈亏虚高，和 syncLedger 的建账口径保持一致。
+      const rec = this.ledgerOf(p) || { borrowed: 0, repaid: 0, buyIn: 0 };
       const net = p.stack - rec.buyIn - rec.borrowed + rec.repaid;
       return {
         seatId: p.id,
@@ -735,7 +740,11 @@ export class PokerGame {
     this.seats = newSeats.map((seat, idx) => {
       if (seat.type === 'human' && seat.owner) {
         const old = prevByOwner.get(seat.owner);
-        return { ...seat, stack: old && old.stack > 0 ? old.stack : this.startingStack };
+        // 已在座者保留筹码。输光的人这里必须保持 0，不能直接补到起始线，
+        // 否则这 2000 绕过账本变成白送，随后 autoRefillBusted 也不会记账。
+        // 补码统一交给 autoRefillBusted，确保每一笔都落到 borrowed 上。
+        const known = prevByOwner.has(seat.owner);
+        return { ...seat, stack: known ? (old.stack || 0) : this.startingStack };
       }
       if (seat.type === 'ai') {
         const old = prevBySeat.get(idx);

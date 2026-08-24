@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="mFelt" cx="50%" cy="38%" r="70%">
+      <stop offset="0%" stop-color="#12855c"/>
+      <stop offset="48%" stop-color="#0b6b3a"/>
+      <stop offset="100%" stop-color="#064a28"/>
+    </radialGradient>
+    <linearGradient id="mGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f3d182"/>
+      <stop offset="50%" stop-color="#e6b84e"/>
+      <stop offset="100%" stop-color="#b8860b"/>
+    </linearGradient>
+    <linearGradient id="mSpade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#dbe2ea"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="#0f172a"/>
+  <circle cx="256" cy="256" r="150" fill="url(#mFelt)"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="url(#mGold)" stroke-width="14"/>
+
+  <path fill="url(#mSpade)"
+        d="M256 168c0 0-70 47-70 94 0 26 20 44 44 44 11 0 20-4 26-10v15l-20 29h40l-20-29v-15c6 6 15 10 26 10 24 0 44-18 44-44 0-47-70-94-70-94z"/>
+</svg>

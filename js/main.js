@@ -6,6 +6,10 @@ import { getClientId, createRoom, fetchRoom, updateRoomState, mutateRoomState, c
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
 import { renderLobby, setLobbyMsg, renderWaiting, setNetStatus, clearOverlay } from './lobby.js';
 import { PROTOCOL_VERSION, BUILD_LABEL, compareVersion, readStateVersion, showVersionBlocker } from './version.js';
+import { initChat, sendChat, makeMessage, MAX_CHAT } from './chat.js';
+import { renderChat, bindChatUI, setChatEnabled, setChatUnread } from './chatui.js';
+import { initPWA } from './pwa.js';
+import { initMobileTabs, getCurrentTab, setTabUnread, setShellVisible } from './mobile.js';
 
 const $ = id => document.getElementById(id);
 const overlay = () => $('overlayRoot');
@@ -33,6 +37,87 @@ let viewModel = null; // 客机端：渲染用视图
 let heroOpts = null;
 let lastSettlementTs = 0; // 客机侧结算单去重
 const handledBankReq = new Set(); // 房主侧借还请求去重
+
+// 聊天本地镜像：远端 chat 数组 + 本地刚发出还没回环的消息。
+// 先本地回显再等同步，手感上点了就有，不用等一个网络往返。
+let chatLocal = [];
+let chatUnread = 0;
+
+// 合并远端聊天与本地待确认消息，按时间排序后去重
+function mergeChat(remoteList) {
+  const remote = Array.isArray(remoteList) ? remoteList.filter(Boolean) : [];
+  const seen = new Set(remote.map(m => m.id));
+  // 本地回显里凡是远端已有的就丢掉，剩下的是还在飞的
+  chatLocal = chatLocal.filter(m => !seen.has(m.id));
+  return [...remote, ...chatLocal]
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .slice(-MAX_CHAT);
+}
+
+// 统一刷新聊天面板
+function refreshChat(remoteList) {
+  const list = mergeChat(remoteList);
+  renderChat(list, session.mySeatId, CLIENT_ID);
+  trackUnread(list);
+  return list;
+}
+
+// 已计入未读的消息 id，避免同一条消息被反复累加。
+// 每次远端状态同步都会整份重刷聊天，必须按 id 去重。
+const seenChatIds = new Set();
+let chatSeeded = false;
+
+// 聊天面板当前是否真的看得见：
+// 窄屏下只有切到「聊天」标签才算可见；宽屏侧边栏常驻，始终算可见。
+function chatVisible() {
+  if (document.hidden) return false;
+  const panel = document.getElementById('chatPanel');
+  if (!panel || panel.classList.contains('hidden')) return false;
+  const narrow = window.matchMedia('(max-width: 1279px)').matches;
+  return narrow ? getCurrentTab() === 'chat' : true;
+}
+
+function applyUnread() {
+  setChatUnread(chatUnread);
+  setTabUnread(chatUnread);
+}
+
+// 累加未读：只统计别人发的、面板不可见时到达的新消息
+function trackUnread(list) {
+  const msgs = Array.isArray(list) ? list.filter(Boolean) : [];
+
+  // 首次进房时把已有历史全部标记为已读，避免一进来就顶着一堆红点
+  if (!chatSeeded) {
+    msgs.forEach(m => seenChatIds.add(m.id));
+    chatSeeded = true;
+    return;
+  }
+
+  const visible = chatVisible();
+  let added = 0;
+  msgs.forEach(m => {
+    if (seenChatIds.has(m.id)) return;
+    seenChatIds.add(m.id);
+    // 自己发的和系统提示不计未读
+    if (m.owner === CLIENT_ID || m.kind === 'system') return;
+    added++;
+  });
+
+  if (visible) {
+    chatUnread = 0;
+  } else if (added > 0) {
+    chatUnread += added;
+  }
+  applyUnread();
+}
+
+// 面板变为可见时清空未读（切标签、切回前台都会触发）
+function markChatRead() {
+  if (!chatVisible()) return;
+  if (chatUnread === 0) return;
+  chatUnread = 0;
+  applyUnread();
+}
 
 const RULES_HTML = `
 <p class="text-slate-300">德州扑克使用一副 52 张牌，每位玩家发 2 张底牌，桌面依次开出 5 张公共牌，用 7 张中最好的 5 张组成牌型比大小。</p>
@@ -106,6 +191,8 @@ function refresh() {
 
 function showLobby() {
   session.phase = 'lobby';
+  // 大厅只留覆盖层，牌桌 / 借贷 / 日志 / 标签栏全部收起
+  setShellVisible(false);
   renderLobby(overlay(), {
     defaultName: localStorage.getItem('poker_name') || '',
     onCreate: handleCreate,
@@ -268,6 +355,11 @@ function openChannelAndWait(timeout = 12000) {
 
 function showWaiting() {
   session.phase = 'waiting';
+  // 等待界面同样是全屏覆盖层，此时牌桌 / 借贷 / 日志都还没有内容，
+  // 外壳继续保持隐藏，直到房主真正开局才显示。
+  setShellVisible(false);
+  // 进了房间就能聊天，不必等开局
+  setChatEnabled(!!session.code);
   renderWaiting(overlay(), {
     code: session.code,
     seats: session.seats,
@@ -287,6 +379,17 @@ function leaveRoom() {
   viewModel = null;
   session.code = null;
   session.seats = [];
+  session.remoteState = null;
+  // 聊天记录属于房间，离开就清空，避免下一个房间串台
+  chatLocal = [];
+  chatUnread = 0;
+  setChatUnread(0);
+  setTabUnread(0);
+  // 未读去重集合属于房间，一并清空并重新进入「首次填充」状态
+  seenChatIds.clear();
+  chatSeeded = false;
+  refreshChat([]);
+  setChatEnabled(false);
   clearLog();
   showLobby();
 }
@@ -371,6 +474,9 @@ function handleRemoteRow(row) {
   if ((state.v || 0) >= session.lastVersion) session.lastVersion = state.v || session.lastVersion;
   session.remoteState = state;
 
+  // 聊天对房主与客机是同一份数据，先统一刷新再走各自分支
+  refreshChat(state.chat);
+
   if (session.isHost) {
     // 房主：只关心座位变化与客机回传的动作
     if (state.seats) {
@@ -404,6 +510,7 @@ function hostStartGame() {
 
   clearOverlay(overlay());
   session.phase = 'playing';
+  setShellVisible(true);
   clearLog();
   initHostGame();
 }
@@ -534,6 +641,9 @@ function pushState() {
     // 否则队列会持续变大，载荷越来越沉，人多时明显卡顿。
     state.actionQueue = [];
     state.action = null;
+    // 房主写整行同样会覆盖聊天记录，必须把远端最新的 chat 带上，
+    // 并合入本地还没回环的消息，否则一推状态大家的发言就没了。
+    state.chat = mergeChat(session.remoteState?.chat);
     session.lastVersion = state.v;
     try {
       // 房主也走 CAS：若客机在此期间写入了账本，本次写入会失败，
@@ -546,6 +656,8 @@ function pushState() {
           session.remoteState = row.state;
           session.lastVersion = row.state.v || session.lastVersion;
         }
+        // 重读到的行里可能有别人刚发的消息，同步进来再重推
+        if (row?.state) refreshChat(row.state.chat);
         pushPending = true;
         setTimeout(flushPendingPush, 80);
         return;
@@ -790,6 +902,8 @@ function enterGameAsClient(state) {
   if (session.phase !== 'playing') {
     clearOverlay(overlay());
     session.phase = 'playing';
+    // 客机可能直接从大厅跳进已开始的牌局，这里必须补一次显示
+    setShellVisible(true);
     clearLog();
   }
   viewModel = buildViewModel(state, session.mySeatId, CLIENT_ID);
@@ -1064,6 +1178,43 @@ function bindEvents() {
 
   $('btnClearLog').addEventListener('click', clearLog);
 
+  // 本地回显通道：sendChat 发起前先把消息塞进本地镜像立刻渲染。
+  // 必须在 bindChatUI 之前注册，否则第一条消息回显不出来。
+  initChat({
+    send: null,
+    echo: msg => {
+      chatLocal.push(msg);
+      refreshChat(session.remoteState?.chat);
+    }
+  });
+
+  // 聊天：房主与客机走同一条 CAS 写入路径，无需区分身份
+  bindChatUI(async text => {
+    if (!session.code) {
+      showModal({
+        title: '还没进房间',
+        body: '<p>聊天需要先建房或用房间码加入。</p>',
+        actions: [{ label: '知道了', primary: true }]
+      });
+      return;
+    }
+    const msg = makeMessage({
+      seatId: session.mySeatId,
+      name: session.myName || '玩家',
+      owner: CLIENT_ID,
+      text
+    });
+    const res = await sendChat(session.code, msg);
+    if (!res.ok) {
+      // 发送失败就把本地回显撤回，避免留下一条永远发不出去的消息
+      chatLocal = chatLocal.filter(m => m.id !== msg.id);
+      refreshChat(session.remoteState?.chat);
+      setNetStatus(`消息发送失败：${res.msg}`, 'error');
+    }
+  });
+
+  setChatEnabled(false);
+
   document.addEventListener('keydown', e => {
     if (!heroOpts) return;
     const key = e.key.toLowerCase();
@@ -1075,6 +1226,23 @@ function bindEvents() {
 }
 
 bindEvents();
+
+// 移动端底部标签栏：切到聊天标签即视为已读
+initMobileTabs(key => {
+  if (key === 'chat') markChatRead();
+});
+
+// 从后台切回前台时，若聊天面板正显示着就清掉红点
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) markChatRead();
+});
+
+// 点聊天列表也算已读
+const chatListEl = $('chatList');
+if (chatListEl) chatListEl.addEventListener('click', markChatRead);
+
+// PWA：注册 Service Worker + 安装引导
+initPWA();
 
 // 页脚展示版本号：出问题时让大家互相报一句版本号就能定位
 const buildEl = $('buildLabel');

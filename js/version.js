@@ -10,7 +10,7 @@
 //
 // 同时记得把 index.html 里 main.js 的 ?v= 查询串改成同一个数字，
 // 否则浏览器可能仍然从缓存里加载旧代码，版本校验就无从触发。
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 // 构建标识：仅用于界面展示与排查问题，不参与任何校验
 export const BUILD_LABEL = `v${PROTOCOL_VERSION}`;
@@ -77,6 +77,16 @@ export async function hardReload() {
     }
   } catch (err) {
     console.warn('[version] 清理缓存失败，直接重载', err);
+  }
+  // 装成 PWA 后，光清 CacheStorage 不够：仍在运行的旧 Service Worker
+  // 可能继续拦截请求。这里强制它拉一次最新的 sw.js，确保代码真的更新。
+  try {
+    if (navigator.serviceWorker?.getRegistrations) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.update().catch(() => null)));
+    }
+  } catch (err) {
+    console.warn('[version] Service Worker 更新失败，直接重载', err);
   }
   const url = new URL(location.href);
   url.searchParams.set('_r', Date.now().toString(36));

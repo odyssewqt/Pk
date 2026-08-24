@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="feltBg" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#12855c"/>
+      <stop offset="48%" stop-color="#0b6b3a"/>
+      <stop offset="100%" stop-color="#064a28"/>
+    </radialGradient>
+    <linearGradient id="goldRing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f3d182"/>
+      <stop offset="50%" stop-color="#e6b84e"/>
+      <stop offset="100%" stop-color="#b8860b"/>
+    </linearGradient>
+    <linearGradient id="spadeFill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#dbe2ea"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#0f172a"/>
+  <circle cx="256" cy="256" r="196" fill="url(#feltBg)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="url(#goldRing)" stroke-width="18"/>
+  <circle cx="256" cy="256" r="164" fill="none" stroke="#e6b84e" stroke-opacity="0.32" stroke-width="4"/>
+
+  <g fill="url(#goldRing)">
+    <rect x="242" y="46" width="28" height="42" rx="8"/>
+    <rect x="242" y="424" width="28" height="42" rx="8"/>
+    <rect x="46" y="242" width="42" height="28" rx="8"/>
+    <rect x="424" y="242" width="42" height="28" rx="8"/>
+  </g>
+
+  <path fill="url(#spadeFill)"
+        d="M256 132c0 0-92 62-92 124 0 34 26 58 58 58 14 0 26-5 34-13v20l-26 38h52l-26-38v-20c8 8 20 13 34 13 32 0 58-24 58-58 0-62-92-124-92-124z"/>
+</svg>
