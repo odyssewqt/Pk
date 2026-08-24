@@ -10,7 +10,7 @@
 //
 // 同时记得把 index.html 里 main.js 的 ?v= 查询串改成同一个数字，
 // 否则浏览器可能仍然从缓存里加载旧代码，版本校验就无从触发。
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 12;
 
 // 构建标识：仅用于界面展示与排查问题，不参与任何校验
 export const BUILD_LABEL = `v${PROTOCOL_VERSION}`;

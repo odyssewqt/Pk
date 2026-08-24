@@ -40,6 +40,13 @@ export class PokerGame {
     // 开牌后的停顿：让玩家有时间自己比较牌型，再公布赢家
     this.showdownPause = options.showdownPause || 4000;
     this.showdownPerPlayer = options.showdownPerPlayer || 600;
+    // 开牌确认制：等所有真人点「看好了」再结算，最长兜底时间防挂机
+    this.showdownMaxWait = options.showdownMaxWait || 30000;
+    // 本手已确认看牌的座位号集合，settleShowdown 后清空
+    this.showdownReady = new Set();
+    this.showdownDeadline = 0;
+    this.showdownTimer = null;
+    this.showdownCont = null;
     // 无限大牌池：只记账，不设上限。allIn 输光后自动补码的额度
     this.autoBorrow = options.autoBorrow || this.startingStack;
     // 账本按稳定身份存放（真人用 seatOwner，AI 用 seat:序号），
@@ -121,6 +128,7 @@ export class PokerGame {
       p.acted = false;
       p.lastAction = '';
       p.showCards = false;
+      p.revealedByChoice = false;
       p.eval = null;
       p.winAmount = 0;
     });
@@ -367,6 +375,12 @@ export class PokerGame {
     this.resetTableState();
     this.stage = 'preflop';
     this.deck = shuffle(createDeck());
+    // 清掉上一手的开牌确认状态与兜底定时器
+    if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    this.showdownTimer = null;
+    this.showdownCont = null;
+    this.showdownReady = new Set();
+    this.showdownDeadline = 0;
 
     this.players.forEach(p => {
       p.hole = [];
@@ -377,6 +391,7 @@ export class PokerGame {
       p.acted = false;
       p.lastAction = p.empty ? '' : (p.stack <= 0 ? '淘汰' : '');
       p.showCards = false;
+      p.revealedByChoice = false;
       p.eval = null;
       p.winAmount = 0;
     });
@@ -587,6 +602,32 @@ export class PokerGame {
     setTimeout(() => this.advance(), 250);
   }
 
+  // 玩家主动亮牌：弃牌后或本手结束后，自愿把底牌公开给全桌
+  // showCards 一旦置真，序列化层就会下发真实牌面，UI 也会翻开，且不可撤回
+  revealHole(playerId) {
+    const p = this.players[playerId];
+    if (!p || p.empty) return { ok: false, msg: '该座位不可亮牌' };
+    if (!p.hole || p.hole.filter(Boolean).length < 2) return { ok: false, msg: '你手上没有底牌可亮' };
+    if (p.showCards) return { ok: false, msg: '你已经亮过牌了' };
+    // 只允许「已弃牌」或「本手已结束」两种时机，避免牌局进行中泄露信息
+    const handOver = this.stage === 'over' || this.stage === 'showdown';
+    if (!p.folded && !handOver) {
+      return { ok: false, msg: '只能在弃牌后或本手结束后亮牌' };
+    }
+    p.showCards = true;
+    p.revealedByChoice = true;
+    // 公共牌够 3 张才算得出牌型，否则只亮牌面不评牌
+    if (this.community.length >= 3) {
+      p.eval = evaluateBest(p.hole.concat(this.community));
+      this.log(`${p.name} 主动亮牌 ${p.hole.map(c => c.label + c.symbol).join(' ')} → ${describeEval(p.eval)}`, 'reveal');
+    } else {
+      this.log(`${p.name} 主动亮牌 ${p.hole.map(c => c.label + c.symbol).join(' ')}`, 'reveal');
+    }
+    this.emit('holeRevealed', { player: p });
+    this.emit('update');
+    return { ok: true };
+  }
+
   nextStage() {
     this.players.forEach(p => { p.bet = 0; p.acted = false; });
     this.currentBet = 0;
@@ -677,13 +718,76 @@ export class PokerGame {
     this.emit('revealCards', { contenders: cont });
     this.emit('update');
 
-    // 停顿之后再结算并公布赢家；停顿时长随参与人数增加
-    const pause = this.showdownPause + Math.max(0, cont.length - 2) * this.showdownPerPlayer;
-    this.emit('showdownPending', { ms: pause, contenders: cont });
-    setTimeout(() => this.settleShowdown(cont), pause);
+    // 不再用固定停顿：等所有真人点「看好了」再结算，
+    // 同时留一个兜底截止时间，避免有人挂机让全桌卡住
+    this.showdownReady = new Set();
+    this.showdownCont = cont;
+    this.showdownDeadline = Date.now() + this.showdownMaxWait;
+    this.emit('showdownPending', {
+      ms: this.showdownMaxWait,
+      deadline: this.showdownDeadline,
+      contenders: cont,
+      waiting: this.showdownWaiters()
+    });
+    this.emit('update');
+
+    if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    this.showdownTimer = setTimeout(() => this.finishShowdown(true), this.showdownMaxWait);
+    // 满桌都是 AI（无真人需要确认）时立即走原来的短停顿节奏
+    this.maybeFinishShowdown();
+  }
+
+  // 需要点确认的座位：本手还在场、非 AI、非空位的真人
+  showdownWaiters() {
+    if (this.stage !== 'showdown') return [];
+    return this.players
+      .filter(p => !p.isAI && !p.empty && p.hole && p.hole.filter(Boolean).length >= 2)
+      .filter(p => !this.showdownReady.has(p.id))
+      .map(p => ({ id: p.id, name: p.name }));
+  }
+
+  // 某个座位点了「看好了」
+  markShowdownReady(playerId) {
+    if (this.stage !== 'showdown') return { ok: false, msg: '现在不是开牌阶段' };
+    const p = this.players[playerId];
+    if (!p || p.empty) return { ok: false, msg: '座位无效' };
+    if (this.showdownReady.has(playerId)) return { ok: false, msg: '你已经确认过了' };
+    this.showdownReady.add(playerId);
+    this.log(`${p.name} 已看好牌`, 'stage');
+    this.emit('showdownReadyChange', {
+      readyIds: [...this.showdownReady],
+      waiting: this.showdownWaiters(),
+      deadline: this.showdownDeadline
+    });
+    this.emit('update');
+    this.maybeFinishShowdown();
+    return { ok: true };
+  }
+
+  // 全员确认后立刻结算；这里仍留一点点延迟让最后一次点击的反馈能画出来
+  maybeFinishShowdown() {
+    if (this.stage !== 'showdown') return;
+    if (this.showdownWaiters().length > 0) return;
+    if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    this.showdownTimer = setTimeout(() => this.finishShowdown(false), 400);
+  }
+
+  finishShowdown(byTimeout) {
+    if (this.stage !== 'showdown') return;
+    if (this.showdownTimer) clearTimeout(this.showdownTimer);
+    this.showdownTimer = null;
+    if (byTimeout) {
+      const left = this.showdownWaiters();
+      if (left.length) this.log(`等待超时，自动公布结果（${left.map(w => w.name).join('、')} 未确认）`, 'warn');
+    }
+    const cont = this.showdownCont || this.contenders();
+    this.showdownCont = null;
+    this.settleShowdown(cont);
   }
 
   settleShowdown(cont) {
+    this.showdownReady = new Set();
+    this.showdownDeadline = 0;
     const pots = this.buildSidePots();
     const winnersAgg = new Map();
 
@@ -744,7 +848,10 @@ export class PokerGame {
         // 否则这 2000 绕过账本变成白送，随后 autoRefillBusted 也不会记账。
         // 补码统一交给 autoRefillBusted，确保每一笔都落到 borrowed 上。
         const known = prevByOwner.has(seat.owner);
-        return { ...seat, stack: known ? (old.stack || 0) : this.startingStack };
+        if (known) return { ...seat, stack: old.stack || 0 };
+        // 新入座者：座位上带了存档筹码就用它（同房间续打），否则给起始筹码
+        const carried = seat.stack != null ? seat.stack : this.startingStack;
+        return { ...seat, stack: carried };
       }
       if (seat.type === 'ai') {
         const old = prevBySeat.get(idx);

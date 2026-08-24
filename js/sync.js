@@ -52,6 +52,7 @@ export function serializeGame(game, room) {
       acted: p.acted,
       lastAction: p.lastAction,
       showCards: p.showCards,
+      revealedByChoice: !!p.revealedByChoice,
       winAmount: p.winAmount,
       borrowed: p.borrowed || 0,
       repaid: p.repaid || 0,
@@ -69,6 +70,8 @@ export function serializeGame(game, room) {
     } : null,
     logs: game.logs.slice(-40),
     settlement: game.settlement || null,
+    showdownReady: game.showdownReady ? [...game.showdownReady] : [],
+    showdownDeadline: game.showdownDeadline || 0,
     action: null,
     ts: Date.now()
   };
@@ -133,6 +136,15 @@ export function buildViewModel(state, mySeatId, myClientId) {
     results: state.results,
     settlement: state.settlement || null,
     logs: state.logs || [],
+    showdownReady: new Set(state.showdownReady || []),
+    showdownDeadline: state.showdownDeadline || 0,
+    showdownWaiters() {
+      if (this.stage !== 'showdown') return [];
+      return this.players
+        .filter(p => !p.isAI && !p.empty && p.hole && p.hole.filter(Boolean).length >= 2)
+        .filter(p => !this.showdownReady.has(p.id))
+        .map(p => ({ id: p.id, name: p.name }));
+    },
     record: { hands: 0, wins: 0, losses: 0, biggestPot: 0 },
     debtOf(p) { return Math.max(0, (p.borrowed || 0) - (p.repaid || 0)); },
     contenders() { return this.players.filter(p => !p.folded); },

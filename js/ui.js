@@ -76,7 +76,7 @@ function seatHTML(game, player, isHero, blinds) {
     ? describeEval(evaluateBest(holeKnown.concat(game.community)))
     : '';
 
-  return `<div class="rounded-2xl border ${active ? 'border-gold seat-active' : winner ? 'border-emerald-400' : 'border-white/15'} ${player.folded && !busted ? 'opacity-45' : ''} ${busted ? 'opacity-30 grayscale' : ''} bg-black/35 backdrop-blur p-3 ${isHero ? 'md:flex md:items-center md:gap-6' : ''} transition-all">
+  return `<div class="rounded-2xl border ${active ? 'border-gold seat-active' : winner ? 'border-emerald-400' : player.revealedByChoice ? 'border-violet-400/60' : 'border-white/15'} ${player.folded && !busted && !player.revealedByChoice ? 'opacity-45' : ''} ${busted ? 'opacity-30 grayscale' : ''} bg-black/35 backdrop-blur p-3 ${isHero ? 'md:flex md:items-center md:gap-6' : ''} transition-all">
     <div class="flex items-center gap-3 ${isHero ? 'md:flex-1' : ''}">
       <div class="w-11 h-11 rounded-full bg-gradient-to-br from-slate-600 to-slate-800 border border-white/20 flex items-center justify-center text-xl shrink-0">${player.avatar}</div>
       <div class="min-w-0 flex-1">
@@ -86,6 +86,7 @@ function seatHTML(game, player, isHero, blinds) {
           ${isDealer ? '<span class="w-5 h-5 rounded-full bg-white text-ink text-[10px] font-black flex items-center justify-center">D</span>' : ''}
           ${isSB ? '<span class="w-5 h-5 rounded-full bg-sky-400 text-ink text-[10px] font-black flex items-center justify-center">SB</span>' : ''}
           ${isBB ? '<span class="w-5 h-5 rounded-full bg-amber-400 text-ink text-[10px] font-black flex items-center justify-center">BB</span>' : ''}
+          ${player.revealedByChoice ? '<span class="px-1.5 py-0.5 rounded bg-violet-500/25 text-violet-200 border border-violet-400/50 text-[10px] font-bold">已亮牌</span>' : ''}
         </div>
         <div class="flex items-center gap-2 mt-0.5">
           <span class="text-gold font-mono font-bold text-sm">${player.stack}</span>
@@ -301,7 +302,7 @@ export function showModal({ title, body, actions = [] }) {
           <h3 class="font-black text-lg text-gold">${title}</h3>
           <button data-close class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
         </div>
-        <div class="p-5 max-h-[60vh] overflow-y-auto scroll-thin text-sm space-y-2">${body}</div>
+        <div data-modal-body class="p-5 max-h-[60vh] overflow-y-auto scroll-thin text-sm space-y-2">${body}</div>
         <div class="px-5 py-4 border-t border-white/10 flex flex-wrap justify-end gap-2">
           ${actions.map((a, i) => `<button data-act="${i}" class="px-4 py-2 rounded-lg text-sm font-bold ${a.primary ? 'bg-gold text-ink hover:brightness-110' : 'bg-white/10 hover:bg-white/20'} transition">${a.label}</button>`).join('')}
         </div>

@@ -3,7 +3,10 @@ import { makeRoomCode } from './net.js';
 
 const AVATARS = ['🙂', '😎', '🐯', '🦊', '🐼', '🐧', '🦁', '🐵'];
 
-export function renderLobby(root, { onCreate, onJoin, defaultName }) {
+export function renderLobby(root, { onCreate, onJoin, defaultName, defaultAvatar, userEmail, onShowRecords, onLogout, onPeekCarry }) {
+  // 预选头像：账号资料里存的优先，取不到就用第一个
+  const initialAvatar = AVATARS.includes(defaultAvatar) ? defaultAvatar : AVATARS[0];
+
   root.innerHTML = `
     <div class="fixed inset-0 z-40 flex items-center justify-center bg-ink/95 backdrop-blur p-4 overflow-y-auto">
       <div class="w-full max-w-2xl">
@@ -13,29 +16,50 @@ export function renderLobby(root, { onCreate, onJoin, defaultName }) {
           <p class="text-sm text-slate-400 mt-1">最多 6 人同桌 · 人数不够由 AI 补位</p>
         </div>
 
+        ${userEmail ? `
+        <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-4 mb-4 flex flex-wrap items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gold/20 border border-gold/40 flex items-center justify-center text-xl shrink-0">${initialAvatar}</div>
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-bold truncate">${defaultName || '玩家'}</div>
+            <div class="text-[11px] text-slate-500 truncate">${userEmail}</div>
+          </div>
+          <button id="btnMyRecords" class="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 transition text-xs font-bold shrink-0">
+            <i class="ri-trophy-line mr-1"></i>我的战绩
+          </button>
+          <button id="btnLogout" class="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 transition text-xs shrink-0">
+            <i class="ri-logout-circle-line mr-1"></i>登出
+          </button>
+        </div>` : ''}
+
         <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-5 mb-4">
           <label class="block text-xs text-slate-400 mb-2">你的昵称</label>
           <input id="lobbyName" maxlength="10" value="${defaultName || ''}" placeholder="输入昵称"
             class="w-full px-4 py-3 rounded-xl bg-black/40 border border-white/15 text-white outline-none focus:border-gold transition mb-4">
           <label class="block text-xs text-slate-400 mb-2">选择头像</label>
           <div id="avatarPick" class="flex flex-wrap gap-2">
-            ${AVATARS.map((a, i) => `<button data-avatar="${a}" class="w-11 h-11 rounded-xl text-xl border transition ${i === 0 ? 'border-gold bg-gold/20' : 'border-white/15 bg-black/30 hover:border-white/40'}">${a}</button>`).join('')}
+            ${AVATARS.map(a => `<button data-avatar="${a}" class="w-11 h-11 rounded-xl text-xl border transition ${a === initialAvatar ? 'border-gold bg-gold/20' : 'border-white/15 bg-black/30 hover:border-white/40'}">${a}</button>`).join('')}
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-5 flex flex-col">
             <h3 class="font-bold text-gold mb-2"><i class="ri-add-circle-line mr-1"></i>创建房间</h3>
-            <p class="text-xs text-slate-400 flex-1 mb-4">你将成为房主，负责发牌与推进牌局。建房后可自由配置每个座位是留给真人还是交给 AI。</p>
-            <button id="btnCreateRoom" class="w-full px-4 py-3 rounded-xl bg-gold text-ink font-bold hover:brightness-110 transition">
-              生成房间码并建房
+            <p class="text-xs text-slate-400 mb-3">你将成为房主，负责发牌与推进牌局。<b class="text-gold">用同一个房间号重开，你的筹码会自动接着上次继续。</b></p>
+            <label class="block text-xs text-slate-400 mb-2">房间号（留空则随机生成）</label>
+            <input id="createCode" maxlength="6" placeholder="自定义 6 位房间号"
+              class="w-full px-4 py-3 rounded-xl bg-black/40 border border-white/15 text-white uppercase tracking-[.3em] font-mono text-center outline-none focus:border-gold transition mb-2">
+            <div id="createCarry" class="text-[11px] text-emerald-300 min-h-4 mb-3"></div>
+            <button id="btnCreateRoom" class="w-full px-4 py-3 rounded-xl bg-gold text-ink font-bold hover:brightness-110 transition mt-auto">
+              创建 / 重开这个房间
             </button>
           </div>
 
           <div class="rounded-2xl bg-slate-900/80 border border-white/10 p-5 flex flex-col">
             <h3 class="font-bold text-sky-300 mb-2"><i class="ri-login-box-line mr-1"></i>加入房间</h3>
+            <p class="text-xs text-slate-400 mb-3">输入朋友给你的房间号入座。你在该房间的历史筹码会自动带入。</p>
             <input id="joinCode" maxlength="6" placeholder="输入 6 位房间码"
-              class="w-full px-4 py-3 rounded-xl bg-black/40 border border-white/15 text-white uppercase tracking-[.3em] font-mono text-center outline-none focus:border-sky-400 transition mb-3">
+              class="w-full px-4 py-3 rounded-xl bg-black/40 border border-white/15 text-white uppercase tracking-[.3em] font-mono text-center outline-none focus:border-sky-400 transition mb-2">
+            <div id="joinCarry" class="text-[11px] text-emerald-300 min-h-4 mb-3"></div>
             <button id="btnJoinRoom" class="w-full px-4 py-3 rounded-xl bg-sky-600 font-bold hover:bg-sky-500 transition mt-auto">
               加入
             </button>
@@ -46,7 +70,7 @@ export function renderLobby(root, { onCreate, onJoin, defaultName }) {
       </div>
     </div>`;
 
-  let avatar = AVATARS[0];
+  let avatar = initialAvatar;
 
   root.querySelector('#avatarPick').addEventListener('click', e => {
     const b = e.target.closest('[data-avatar]');
@@ -60,23 +84,77 @@ export function renderLobby(root, { onCreate, onJoin, defaultName }) {
 
   const nameOf = () => (root.querySelector('#lobbyName').value || '').trim();
 
+  // 房间号统一大写并去掉非法字符，避免 abc / ABC 被当成两个房间
+  const CODE_OK = /^[A-Z0-9]{6}$/;
+  function normCode(raw) {
+    return (raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
+  // 输入房间号时实时提示该房间存的筹码
+  function bindCarryHint(inputId, hintId) {
+    const input = root.querySelector(`#${inputId}`);
+    const hint = root.querySelector(`#${hintId}`);
+    if (!input || !hint || !onPeekCarry) return;
+    let seq = 0;
+    input.addEventListener('input', async () => {
+      const code = normCode(input.value);
+      if (input.value !== code) input.value = code;
+      const mine = ++seq;
+      if (!CODE_OK.test(code)) { hint.textContent = ''; return; }
+      hint.textContent = '正在查询该房间的筹码存档…';
+      hint.className = 'text-[11px] text-slate-400 min-h-4 mb-3';
+      try {
+        const chips = await onPeekCarry(code);
+        if (mine !== seq) return;
+        if (chips == null) {
+          hint.textContent = '这个房间还没有你的筹码记录，将按起始筹码入座';
+          hint.className = 'text-[11px] text-slate-500 min-h-4 mb-3';
+        } else {
+          hint.textContent = `将带入你在该房间的筹码：${chips}`;
+          hint.className = 'text-[11px] text-emerald-300 min-h-4 mb-3';
+        }
+      } catch {
+        if (mine !== seq) return;
+        hint.textContent = '';
+      }
+    });
+  }
+  bindCarryHint('createCode', 'createCarry');
+  bindCarryHint('joinCode', 'joinCarry');
+
   root.querySelector('#btnCreateRoom').addEventListener('click', () => {
     const name = nameOf();
     if (!name) return setLobbyMsg('请先填昵称', 'error');
-    onCreate({ name, avatar, code: makeRoomCode() });
+    const raw = normCode(root.querySelector('#createCode').value);
+    // 留空表示不在意房间号，随机给一个
+    if (raw && !CODE_OK.test(raw)) {
+      return setLobbyMsg('房间号需要是 6 位字母或数字，留空则自动生成', 'error');
+    }
+    onCreate({ name, avatar, code: raw || makeRoomCode() });
   });
 
   root.querySelector('#btnJoinRoom').addEventListener('click', () => {
     const name = nameOf();
-    const code = (root.querySelector('#joinCode').value || '').trim().toUpperCase();
+    const code = normCode(root.querySelector('#joinCode').value);
     if (!name) return setLobbyMsg('请先填昵称', 'error');
-    if (code.length !== 6) return setLobbyMsg('房间码是 6 位字母数字', 'error');
+    if (!CODE_OK.test(code)) return setLobbyMsg('房间码是 6 位字母数字', 'error');
     onJoin({ name, avatar, code });
+  });
+
+  root.querySelector('#createCode').addEventListener('keydown', e => {
+    if (e.key === 'Enter') root.querySelector('#btnCreateRoom').click();
   });
 
   root.querySelector('#joinCode').addEventListener('keydown', e => {
     if (e.key === 'Enter') root.querySelector('#btnJoinRoom').click();
   });
+
+  // 账号区按钮：未登录时这两个元素不存在，需判空
+  const recBtn = root.querySelector('#btnMyRecords');
+  if (recBtn && onShowRecords) recBtn.addEventListener('click', onShowRecords);
+  const outBtn = root.querySelector('#btnLogout');
+  if (outBtn && onLogout) outBtn.addEventListener('click', onLogout);
+
   root.querySelector('#lobbyName').focus();
 }
 
@@ -131,7 +209,7 @@ function seatRowHTML(seat, i, isHost, mySeatId) {
     </div>`;
 }
 
-export function renderWaiting(root, { code, seats, isHost, mySeatId, onStart, onLeave, onToggleSeat }) {
+export function renderWaiting(root, { code, seats, isHost, mySeatId, onStart, onLeave, onToggleSeat, myCarry }) {
   const humans = seats.filter(s => s.type === 'human' && s.owner).length;
   const ais = seats.filter(s => s.type === 'ai').length;
   const total = humans + ais;
@@ -149,6 +227,11 @@ export function renderWaiting(root, { code, seats, isHost, mySeatId, onStart, on
             </button>
           </div>
           <div id="copyHint" class="text-xs text-emerald-300 h-4 mb-4"></div>
+
+          ${myCarry != null ? `
+          <div class="rounded-xl bg-emerald-500/10 border border-emerald-400/40 px-3 py-2 mb-4 text-xs text-emerald-200">
+            <i class="ri-history-line mr-1"></i>已带入你在本房间的历史筹码 <b class="font-mono">${myCarry}</b>
+          </div>` : ''}
 
           <div class="space-y-2 mb-4 text-left">
             ${seats.map((s, i) => seatRowHTML(s, i, isHost, mySeatId)).join('')}

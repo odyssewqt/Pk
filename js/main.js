@@ -10,6 +10,9 @@ import { initChat, sendChat, makeMessage, MAX_CHAT } from './chat.js';
 import { renderChat, bindChatUI, setChatEnabled, setChatUnread } from './chatui.js';
 import { initPWA } from './pwa.js';
 import { initMobileTabs, getCurrentTab, setTabUnread, setShellVisible } from './mobile.js';
+import { isLoggedIn, currentUser, signIn, signUp, signOut, upsertProfile, fetchProfile } from './auth.js';
+import { renderAuth, setAuthMsg, recordsHTML } from './authui.js';
+import { saveMyRecord, fetchMyRecords, summarize, fetchRoomCarry, invalidateRoomCarry } from './records.js';
 
 const $ = id => document.getElementById(id);
 const overlay = () => $('overlayRoot');
@@ -140,8 +143,11 @@ const RULES_HTML = `
 
 // ---------- 座位工具 ----------
 // 六人桌：0 号是房主，1 号默认开放给真人，其余先用 AI 占位，房主可在等待界面调整
-function buildInitialSeats(name, avatar) {
-  const seats = [{ type: 'human', owner: CLIENT_ID, name, avatar }];
+function buildInitialSeats(name, avatar, carry) {
+  const host = { type: 'human', owner: CLIENT_ID, name, avatar };
+  // 有存档就带入，没有则交给引擎用 startingStack 兜底
+  if (carry != null) host.stack = carry;
+  const seats = [host];
   seats.push({ type: 'human', owner: null, name: '', avatar: '' });
   for (let i = 2; i < MAX_SEATS; i++) seats.push({ type: 'ai' });
   return seats;
@@ -159,23 +165,44 @@ function findOpenSeat(seats) {
 }
 
 // ---------- 当前渲染对象 ----------
-// 开牌停顿倒计时：让玩家清楚还有多久公布结果，避免以为卡住了
+// 开牌确认倒计时：显示还有谁没看好，以及兜底剩余时间
 let showdownTimer = null;
+let showdownDeadline = 0;
+// 客机本地乐观标记：记住"我已点过确认"的手牌号，
+// 否则每次状态同步重建 viewModel 都会把按钮弹回未确认态
+let myReadyHandNo = -1;
+
+function iAmReady(g) {
+  if (!g) return false;
+  const readySet = g.showdownReady instanceof Set ? g.showdownReady : new Set();
+  return readySet.has(session.mySeatId) || myReadyHandNo === g.handNo;
+}
 
 function stopShowdownCountdown() {
   if (showdownTimer) clearInterval(showdownTimer);
   showdownTimer = null;
+  showdownDeadline = 0;
 }
 
-function startShowdownCountdown(ms) {
+function renderShowdownWait() {
+  const g = currentGame();
+  if (!g || g.stage !== 'showdown') { stopShowdownCountdown(); return; }
+  const waiting = typeof g.showdownWaiters === 'function' ? g.showdownWaiters() : [];
+  const left = Math.max(0, Math.ceil((showdownDeadline - Date.now()) / 1000));
+  if (!waiting.length) {
+    setTableMsg('全员已看好，正在公布结果…');
+  } else {
+    const names = waiting.map(w => w.name).join('、');
+    setTableMsg(`开牌！等待 ${names} 看牌… ${left}s 后自动公布`);
+  }
+  refreshReadyButton();
+}
+
+function startShowdownCountdown(ms, deadline) {
   stopShowdownCountdown();
-  let left = Math.ceil(ms / 1000);
-  setTableMsg(`开牌！比较牌型… ${left}s`);
-  showdownTimer = setInterval(() => {
-    left--;
-    if (left <= 0) { stopShowdownCountdown(); return; }
-    setTableMsg(`开牌！比较牌型… ${left}s`);
-  }, 1000);
+  showdownDeadline = deadline || (Date.now() + ms);
+  renderShowdownWait();
+  showdownTimer = setInterval(renderShowdownWait, 1000);
 }
 
 function currentGame() {
@@ -187,6 +214,85 @@ function refresh() {
   if (g) renderTable(g);
 }
 
+// ================= 账号流程 =================
+
+// 登录成功后缓存的资料，供大厅预填昵称头像
+let myProfile = null;
+
+// 入口分流：没登录先看登录页，登录了直接进大厅
+async function boot() {
+  if (!isLoggedIn()) {
+    showAuth();
+    return;
+  }
+  // 已有会话：顺手拉一次资料，失败也不阻塞进大厅
+  try {
+    myProfile = await fetchProfile();
+  } catch (err) {
+    console.warn('[boot] 读取资料失败', err);
+  }
+  showLobby();
+}
+
+function showAuth() {
+  session.phase = 'auth';
+  setShellVisible(false);
+  renderAuth(overlay(), {
+    onLogin: async ({ email, password }) => {
+      await signIn(email, password);
+      setAuthMsg('登录成功，正在进入…', 'ok');
+      try {
+        myProfile = await fetchProfile();
+      } catch { myProfile = null; }
+      showLobby();
+      runBackendCheck();
+    },
+    onSignup: async ({ email, password, nickname, avatar }) => {
+      const res = await signUp(email, password, nickname, avatar);
+      if (res.needVerify) {
+        setAuthMsg('注册成功，但该项目开启了邮箱验证。请去邮箱点验证链接后再登录', 'ok');
+        return;
+      }
+      setAuthMsg('注册成功，正在进入…', 'ok');
+      myProfile = { nickname, avatar };
+      showLobby();
+      runBackendCheck();
+    }
+  });
+}
+
+async function handleLogout() {
+  await signOut();
+  myProfile = null;
+  session.code = null;
+  session.isHost = false;
+  session.mySeatId = null;
+  showAuth();
+}
+
+// 战绩弹窗：先弹出骨架，数据到了再替换内容
+async function showMyRecords() {
+  const user = currentUser();
+  showModal({
+    title: '🏆 我的历史对局',
+    body: '<p class="text-sm text-slate-400 py-6 text-center">正在读取战绩…</p>',
+    actions: [{ label: '关闭', primary: true }]
+  });
+
+  try {
+    const list = await fetchMyRecords();
+    const box = document.querySelector('#modalRoot [data-modal-body]');
+    const html = recordsHTML(list, summarize(list), user?.email);
+    if (box) box.innerHTML = html;
+    else showModal({ title: '🏆 我的历史对局', body: html, actions: [{ label: '关闭', primary: true }] });
+  } catch (err) {
+    const box = document.querySelector('#modalRoot [data-modal-body]');
+    const html = `<p class="text-sm text-rose-300">读取失败：${err.message}</p>
+      <p class="text-xs text-slate-500 mt-2">若提示表不存在，请先在 Supabase 后台建好 match_records 表。</p>`;
+    if (box) box.innerHTML = html;
+  }
+}
+
 // ================= 大厅流程 =================
 
 function showLobby() {
@@ -194,21 +300,49 @@ function showLobby() {
   // 大厅只留覆盖层，牌桌 / 借贷 / 日志 / 标签栏全部收起
   setShellVisible(false);
   renderLobby(overlay(), {
-    defaultName: localStorage.getItem('poker_name') || '',
+    // 昵称优先用账号资料，其次是本地上次填的
+    defaultName: myProfile?.nickname || localStorage.getItem('poker_name') || '',
+    defaultAvatar: myProfile?.avatar || '',
+    userEmail: currentUser()?.email || '',
     onCreate: handleCreate,
-    onJoin: handleJoin
+    onJoin: handleJoin,
+    onPeekCarry: fetchRoomCarry,
+    onShowRecords: showMyRecords,
+    onLogout: handleLogout
   });
 }
 
 async function handleCreate({ name, avatar, code }) {
   localStorage.setItem('poker_name', name);
+  syncProfile(name, avatar);
   setLobbyMsg('正在创建房间…');
+
+  // 自选房间号可能撞上一个已存在的房间。若那个房间是我自己建的，
+  // 视为「重开」：直接接管它并沿用存档筹码；否则提示换一个号，
+  // 避免把别人正在打的房间冲掉。
+  let existingRoom = null;
+  try {
+    existingRoom = await fetchRoom(code);
+  } catch (err) {
+    console.error(err);
+    setLobbyMsg(`查询房间失败：${err.message}`, 'error');
+    return;
+  }
+  if (existingRoom && existingRoom.host_id !== CLIENT_ID) {
+    setLobbyMsg(`房间 ${code} 已被其他人占用，请换一个房间号，或用「加入房间」进去`, 'error');
+    return;
+  }
+
+  // 带入这个房间的历史筹码；查不到就用起始筹码
+  const carry = await fetchRoomCarry(code);
+
   session.isHost = true;
   session.mySeatId = 0;
   session.myName = name;
   session.myAvatar = avatar;
   session.code = code;
-  session.seats = buildInitialSeats(name, avatar);
+  session.myCarry = carry;
+  session.seats = buildInitialSeats(name, avatar, carry);
 
   const initial = {
     v: 1,
@@ -221,7 +355,9 @@ async function handleCreate({ name, avatar, code }) {
   };
 
   try {
-    await createRoom(code, CLIENT_ID, initial);
+    // 重开自己的旧房间：房间行已存在，改为覆盖状态而不是重复插入
+    if (existingRoom) await updateRoomState(code, initial);
+    else await createRoom(code, CLIENT_ID, initial);
   } catch (err) {
     console.error(err);
     setLobbyMsg(`建房失败：${err.message}`, 'error');
@@ -241,8 +377,16 @@ async function handleCreate({ name, avatar, code }) {
   showWaiting();
 }
 
+// 把大厅里填的昵称头像写回账号资料，失败不影响进房
+function syncProfile(name, avatar) {
+  if (!isLoggedIn()) return;
+  myProfile = { nickname: name, avatar };
+  upsertProfile(name, avatar).catch(err => console.warn('[profile] 同步失败', err));
+}
+
 async function handleJoin({ name, avatar, code }) {
   localStorage.setItem('poker_name', name);
+  syncProfile(name, avatar);
   setLobbyMsg('正在查找房间…');
 
   let room;
@@ -284,7 +428,13 @@ async function handleJoin({ name, avatar, code }) {
       setLobbyMsg('六个座位都坐满了，等有人离开再试', 'error');
       return;
     }
-    seats[seatIdx] = { type: 'human', owner: CLIENT_ID, name, avatar };
+    // 首次入座才带入存档筹码；重连回原座位要沿用桌上现有筹码，
+    // 否则会把这一场已经打出来的盈亏抹掉
+    const carry = await fetchRoomCarry(code);
+    const seat = { type: 'human', owner: CLIENT_ID, name, avatar };
+    if (carry != null) seat.stack = carry;
+    session.myCarry = carry;
+    seats[seatIdx] = seat;
   }
 
   session.isHost = false;
@@ -367,7 +517,8 @@ function showWaiting() {
     mySeatId: session.mySeatId,
     onStart: hostStartGame,
     onLeave: leaveRoom,
-    onToggleSeat: hostToggleSeat
+    onToggleSeat: hostToggleSeat,
+    myCarry: session.myCarry
   });
   setNetStatus('实时连接中…');
 }
@@ -566,8 +717,10 @@ function initHostGame() {
   game.on('revealCards', () => {
     heroOpts = null;
     renderWaitControls('开牌，请比较各家牌型…');
+    refreshReadyButton();
   });
-  game.on('showdownPending', ({ ms }) => startShowdownCountdown(ms));
+  game.on('showdownPending', ({ ms, deadline }) => startShowdownCountdown(ms, deadline));
+  game.on('showdownReadyChange', () => renderShowdownWait());
   game.on('handEnd', res => {
     heroOpts = null;
     stopShowdownCountdown();
@@ -579,6 +732,9 @@ function initHostGame() {
     if (seatChangePending) setTimeout(() => applySeatChange(), 300);
   });
   game.on('bankChange', () => { renderTable(game); });
+  game.on('holeRevealed', ({ player }) => {
+    setTableMsg(`${player.name} 亮出了底牌`);
+  });
   game.on('gameOver', ({ hero }) => {
     showModal({
       title: '🏆 牌局暂停',
@@ -710,6 +866,23 @@ function consumeClientAction(action) {
       : game.repay(action.seatId, action.amount || 0);
     if (!res.ok) game.log(`${game.players[action.seatId]?.name || '玩家'} 的${action.action === 'borrow' ? '借码' : '还码'}请求被拒绝：${res.msg}`, 'warn');
     // 成功时引擎会 emit('update')，已绑定 pushState，无需重复写库
+    return;
+  }
+
+  // 亮牌请求：与下注轮无关，不受行动顺序限制，任何时机由引擎自行校验
+  if (action.action === 'reveal') {
+    if (action.seatId === session.mySeatId) return;
+    const res = game.revealHole(action.seatId);
+    if (!res.ok) {
+      game.log(`${game.players[action.seatId]?.name || '玩家'} 的亮牌请求被拒绝：${res.msg}`, 'warn');
+    }
+    return;
+  }
+
+  // 开牌确认：与下注轮无关，任何时机由引擎自行校验
+  if (action.action === 'ready') {
+    if (action.seatId === session.mySeatId) return;
+    game.markShowdownReady(action.seatId);
     return;
   }
 
@@ -886,12 +1059,24 @@ function handleSettle() {
   }
   const s = game.settleTable();
   showSettlementModal(s);
+  // 房主写自己那一行；每个客机各写自己的，满足 RLS 的 user_id = auth.uid()
+  saveMyRecord(s, { roomCode: session.code, mySeatId: session.mySeatId })
+    .then(r => {
+      if (r.ok) setNetStatus('本场战绩已记录', 'ok');
+      else if (r.msg) setNetStatus(`战绩保存失败：${r.msg}`, 'error');
+    });
 }
 
 function showSettlementModal(s) {
+  const mine = Array.isArray(s?.rows)
+    ? s.rows.find(r => r.seatId === session.mySeatId && !r.isAI)
+    : null;
+  const carryNote = mine
+    ? `<p class="text-xs text-emerald-300 mt-3">你当前筹码 <b>${mine.stack}</b> 已存入房间 <b class="font-mono">${session.code}</b>，下次用同一个房间号进来会接着这个数继续。</p>`
+    : '';
   showModal({
     title: '💰 本场结算',
-    body: settlementHTML(s),
+    body: settlementHTML(s) + carryNote,
     actions: [{ label: '关闭', primary: true }]
   });
 }
@@ -914,6 +1099,12 @@ function enterGameAsClient(state) {
   if (st && st.ts && st.ts !== lastSettlementTs) {
     lastSettlementTs = st.ts;
     showSettlementModal(st);
+    // 客机写自己那一行：房主无权替别人写，必须各自落库
+    saveMyRecord(st, { roomCode: session.code, mySeatId: session.mySeatId })
+      .then(r => {
+        if (r.ok) setNetStatus('本场战绩已记录', 'ok');
+        else if (r.msg) setNetStatus(`战绩保存失败：${r.msg}`, 'error');
+      });
   }
 
   // 同步日志：只补新增部分
@@ -933,11 +1124,12 @@ function enterGameAsClient(state) {
   if (stage === 'showdown') {
     heroOpts = null;
     renderWaitControls('开牌，请比较各家牌型…');
-    setTableMsg('开牌！比较牌型…');
+    startShowdownCountdown(0, state.showdownDeadline || 0);
     return;
   }
   if (stage === 'over') {
     heroOpts = null;
+    stopShowdownCountdown();
     renderEndControls();
     setTableMsg('本局结束，等房主开下一局');
     return;
@@ -1023,16 +1215,61 @@ function renderIdleControls() {
 
 function renderEndControls() {
   $('actionHint').innerHTML = `<span class="text-emerald-300 font-bold">本局结束</span> · 查看日志了解详情`;
-  $('actionButtons').innerHTML = session.isHost
-    ? btn('start', '下一局', 'bg-gold text-ink hover:brightness-110 col-span-2 sm:col-span-5', 'ri-skip-forward-line')
-    : btn('none', '等房主开下一局…', 'bg-white/5 text-slate-500 cursor-not-allowed col-span-2 sm:col-span-5');
+  const main = session.isHost
+    ? btn('start', '下一局', 'bg-gold text-ink hover:brightness-110 col-span-2 sm:col-span-4', 'ri-skip-forward-line')
+    : btn('none', '等房主开下一局…', 'bg-white/5 text-slate-500 cursor-not-allowed col-span-2 sm:col-span-4');
+  $('actionButtons').innerHTML = main + revealButtonHTML();
   $('quickBets').innerHTML = '';
   $('raiseSlider').disabled = true;
 }
 
+// 亮牌按钮：手上有底牌且还没亮过才给按钮，否则显示已亮牌的禁用态
+function revealButtonHTML() {
+  const g = currentGame();
+  if (!g) return '';
+  const me = g.players.find(p => p.id === session.mySeatId);
+  if (!me || me.empty) return '';
+  if (me.hole.filter(Boolean).length < 2) return '';
+  if (me.showCards) {
+    return btn('none', '已亮牌', 'bg-violet-500/20 text-violet-300 cursor-not-allowed');
+  }
+  return btn('reveal', '亮牌', 'bg-violet-600 hover:bg-violet-500', 'ri-eye-line');
+}
+
+// 开牌确认按钮：开牌阶段给每个真人一个「我看好了」，全员点完立刻结算
+function readyButtonHTML() {
+  const g = currentGame();
+  if (!g || g.stage !== 'showdown') return '';
+  const me = g.players.find(p => p.id === session.mySeatId);
+  if (!me || me.empty) return '';
+  if (me.hole.filter(Boolean).length < 2) return '';
+  if (iAmReady(g)) {
+    return btn('none', '已确认，等其他人…', 'bg-emerald-500/20 text-emerald-300 cursor-not-allowed col-span-2 sm:col-span-3');
+  }
+  return btn('ready', '我看好了', 'bg-emerald-600 hover:bg-emerald-500 col-span-2 sm:col-span-3', 'ri-eye-2-line');
+}
+
+// 只重画按钮区，避免整表重渲染打断玩家看牌
+function refreshReadyButton() {
+  const holder = $('actionButtons');
+  if (!holder) return;
+  const g = currentGame();
+  if (!g || g.stage !== 'showdown') return;
+  holder.innerHTML = readyButtonHTML() + revealButtonHTML();
+}
+
 function renderWaitControls(text) {
   $('actionHint').innerHTML = `<span class="text-slate-400">${text}</span>`;
-  $('actionButtons').innerHTML = btn('none', text, 'bg-white/5 text-slate-500 cursor-not-allowed col-span-2 sm:col-span-5');
+  const g = currentGame();
+  const me = g ? g.players.find(p => p.id === session.mySeatId) : null;
+  // 已弃牌的人在等别人行动时也可以亮牌，所以这里留出按钮位
+  const canReveal = me && me.folded && !me.empty && me.hole.filter(Boolean).length >= 2;
+  if (canReveal) {
+    const wait = btn('none', text, 'bg-white/5 text-slate-500 cursor-not-allowed col-span-2 sm:col-span-4');
+    $('actionButtons').innerHTML = wait + revealButtonHTML();
+  } else {
+    $('actionButtons').innerHTML = btn('none', text, 'bg-white/5 text-slate-500 cursor-not-allowed col-span-2 sm:col-span-5');
+  }
   $('quickBets').innerHTML = '';
   $('raiseSlider').disabled = true;
 }
@@ -1107,6 +1344,63 @@ function showResultModal(res) {
 
 // ================= 事件绑定 =================
 
+// 亮牌：不可撤回，所以先弹窗确认一次
+function doReveal() {
+  const g = currentGame();
+  if (!g) return;
+  const me = g.players.find(p => p.id === session.mySeatId);
+  if (!me || me.showCards) return;
+  const known = me.hole.filter(Boolean);
+  if (known.length < 2) return;
+
+  showModal({
+    title: '亮牌给全桌',
+    body: `<p>你的底牌 <b class="font-mono text-gold">${known.map(c => c.label + c.symbol).join(' ')}</b> 将公开给房间里所有人。</p>
+      <p class="text-xs text-rose-300 mt-2">亮牌不可撤回，本手结束前其他人都能看到。</p>`,
+    actions: [
+      { label: '再想想' },
+      {
+        label: '确认亮牌', primary: true, onClick: () => {
+          if (session.isHost) {
+            const res = game.revealHole(session.mySeatId);
+            if (!res.ok) {
+              showModal({ title: '暂时无法亮牌', body: `<p>${res.msg}</p>`, actions: [{ label: '知道了', primary: true }] });
+              return;
+            }
+            refreshRevealButton();
+          } else {
+            sendClientAction('reveal', 0);
+            setTableMsg('已请求亮牌，等待同步…');
+          }
+        }
+      }
+    ]
+  });
+}
+
+// 亮牌成功后只需把按钮换成禁用态，牌面由 renderTable 统一刷新
+function refreshRevealButton() {
+  const holder = $('actionButtons');
+  if (!holder) return;
+  const old = holder.querySelector('[data-act="reveal"]');
+  if (old) old.outerHTML = btn('none', '已亮牌', 'bg-violet-500/20 text-violet-300 cursor-not-allowed');
+}
+
+// 开牌确认：告诉全桌自己已经看好牌，可以公布结果了
+function doReady() {
+  const g = currentGame();
+  if (!g || g.stage !== 'showdown') return;
+  if (iAmReady(g)) return;
+  if (session.isHost) {
+    game.markShowdownReady(session.mySeatId);
+  } else {
+    myReadyHandNo = g.handNo;
+    sendClientAction('ready', 0);
+    setTableMsg('已确认看好，等待其他玩家…');
+  }
+  refreshReadyButton();
+}
+
 function doAction(act, amount = 0) {
   if (session.isHost) {
     if (!game || !game.awaitingHero) return;
@@ -1129,6 +1423,8 @@ function bindEvents() {
       if (session.isHost && game) game.startHand();
       return;
     }
+    if (act === 'reveal') { doReveal(); return; }
+    if (act === 'ready') { doReady(); return; }
     if (!heroOpts) return;
 
     if (act === 'raise') {
@@ -1248,11 +1544,17 @@ initPWA();
 const buildEl = $('buildLabel');
 if (buildEl) buildEl.textContent = BUILD_LABEL;
 
-showLobby();
+// 后端自检：提前暴露不可达问题，而不是等到点建房才报错。
+// 抽成函数是因为登录成功后进入大厅也要跑一次（那时 lobbyMsg 才存在）。
+function runBackendCheck() {
+  checkBackend().then(ok => {
+    if (!ok) {
+      setLobbyMsg('联机服务当前不可达，建房/加入会失败。请检查网络代理或浏览器插件是否拦截了 supabase.co', 'error');
+    }
+  });
+}
 
-// 启动自检：提前暴露后端不可达问题，而不是等到点建房才报错
-checkBackend().then(ok => {
-  if (!ok) {
-    setLobbyMsg('联机服务当前不可达，建房/加入会失败。请检查网络代理或浏览器插件是否拦截了 supabase.co', 'error');
-  }
+// 入口：未登录先登录，已登录直接进大厅
+boot().then(() => {
+  if (session.phase === 'lobby') runBackendCheck();
 });
