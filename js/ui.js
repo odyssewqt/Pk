@@ -211,6 +211,102 @@ export function settlementHTML(settlement) {
     <div class="mt-3 text-[11px]">${check}</div>`;
 }
 
+// ================= 筹码排行榜 =================
+//
+// 数据来源就是当前牌桌的 players，房主端是 game，客机端是 viewModel，
+// 两边的 stack 字段都由 serializeGame / buildViewModel 保证存在，
+// 所以同一份渲染逻辑对房主和客机都成立。
+//
+// 排序口径：净值 = 手上筹码 − 净欠牌池，降序。借来的筹码不算自己的身家，
+// 所以借了不还的人排名会被压下去，跟结算时的账目口径一致。
+// 净值可以为负（借得比手上剩的还多）。并列名次共享同一个排名（1,2,2,4）。
+export function leaderboardHTML(game, opts = {}) {
+  const players = Array.isArray(game?.players) ? game.players : [];
+  // 空座位不进榜；已淘汰（stack 为 0）仍然进榜，排在最后，否则榜会凭空少人
+  const rows = players
+    .filter(p => p && !p.empty)
+    .map(p => {
+      const stack = Number(p.stack) || 0;
+      const debt = Math.max(0, (Number(p.borrowed) || 0) - (Number(p.repaid) || 0));
+      return {
+        name: p.name || '玩家',
+        avatar: p.avatar || '🙂',
+        stack,
+        debt,
+        net: stack - debt,
+        isAI: !!p.isAI,
+        isHero: !!p.isHero
+      };
+    })
+    // 净值相同时手上筹码多的排前面，名次更符合直觉
+    .sort((a, b) => (b.net - a.net) || (b.stack - a.stack));
+
+  if (!rows.length) {
+    return '<p class="text-sm text-slate-400 py-6 text-center">当前牌桌还没有玩家。</p>';
+  }
+
+  // 并列同名次：净值与手上筹码都相同才算真正并列，口径与上面的排序键一致
+  let lastKey = null;
+  let lastRank = 0;
+  rows.forEach((r, i) => {
+    const key = `${r.net}_${r.stack}`;
+    if (lastKey !== null && key === lastKey) r.rank = lastRank;
+    else { r.rank = i + 1; lastRank = r.rank; }
+    lastKey = key;
+  });
+
+  // 进度条按净值占「全桌正净值总和」的比例画。负净值的人没有条，
+  // 直接用总和当分母会被负数拉大比例，所以只累加正数部分。
+  const totalPositive = rows.reduce((s, r) => s + Math.max(0, r.net), 0);
+  const me = rows.find(r => r.isHero);
+  const MEDAL = { 1: '🥇', 2: '🥈', 3: '🥉' };
+
+  const list = rows.map(r => {
+    const pct = totalPositive > 0 ? Math.round((Math.max(0, r.net) / totalPositive) * 100) : 0;
+    const medal = MEDAL[r.rank];
+    const rankCell = medal
+      ? `<span class="text-lg leading-none w-7 text-center shrink-0">${medal}</span>`
+      : `<span class="w-7 text-center shrink-0 font-mono font-bold text-slate-500">${r.rank}</span>`;
+    const bar = r.rank === 1 ? 'bg-gold' : r.isHero ? 'bg-emerald-400' : 'bg-slate-500';
+    // 净值是排名依据，负数要显眼；手上筹码退为次要信息放到第二行
+    const netCls = r.net > 0 ? 'text-gold' : r.net < 0 ? 'text-rose-300' : 'text-slate-400';
+
+    return `<div class="rounded-lg ${r.isHero ? 'bg-emerald-500/10 border border-emerald-400/40' : 'bg-white/5 border border-transparent'} p-2.5">
+      <div class="flex items-center gap-2">
+        ${rankCell}
+        <span class="text-lg shrink-0">${r.avatar}</span>
+        <span class="font-bold truncate flex-1">${r.name}</span>
+        ${r.isHero ? '<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-400/40 text-[10px] font-bold shrink-0">我</span>' : ''}
+        ${r.isAI ? '<span class="px-1.5 py-0.5 rounded bg-slate-500/20 text-slate-400 border border-slate-400/30 text-[10px] font-bold shrink-0">AI</span>' : ''}
+        ${r.stack <= 0 ? '<span class="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-400/40 text-[10px] font-bold shrink-0">淘汰</span>' : ''}
+        <span class="font-mono font-black ${netCls} shrink-0">${r.net}</span>
+      </div>
+      <div class="mt-1 flex items-center gap-2 text-[10px] font-mono text-slate-500">
+        <span>手上 <b class="text-slate-300">${r.stack}</b></span>
+        ${r.debt > 0 ? `<span class="text-violet-300">净欠 <b>${r.debt}</b></span>` : ''}
+      </div>
+      <div class="mt-1.5 flex items-center gap-2">
+        <div class="flex-1 h-1.5 rounded-full bg-black/40 overflow-hidden">
+          <div class="h-full ${bar} rounded-full transition-all" style="width:${pct}%"></div>
+        </div>
+        <span class="text-[10px] font-mono text-slate-500 w-9 text-right shrink-0">${pct}%</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const myLine = me
+    ? `你目前排在第 <b class="text-gold">${me.rank}</b> 名 / 共 <b class="text-slate-200">${rows.length}</b> 人，净值 <b class="${me.net < 0 ? 'text-rose-300' : 'text-gold'}">${me.net}</b>`
+    : `当前共 <b class="text-slate-200">${rows.length}</b> 名玩家在座`;
+
+  const handNo = Number(game?.handNo) || 0;
+
+  return `<div class="mb-3 rounded-lg bg-white/5 p-2.5 text-xs text-slate-300 leading-relaxed">
+      ${myLine}${handNo ? ` · 已进行 <b class="text-slate-200">${handNo}</b> 手` : ''}
+    </div>
+    <div class="space-y-2">${list}</div>
+    <p class="mt-3 text-[11px] text-slate-500 leading-relaxed">排名按净值从高到低：净值 = 手上筹码 − 净欠牌池。借来的筹码不计入身家，欠得多会被压低名次，净值可以为负。百分比为净值占全桌正净值总和的比例。</p>`;
+}
+
 function renderStats(game) {
   const hero = heroOf(game);
   const humans = game.players.filter(p => !p.isAI).length;

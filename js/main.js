@@ -1,6 +1,6 @@
 // 主入口：大厅 → 联机对局装配
 import { PokerGame, MAX_SEATS } from './engine.js';
-import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache, showAmountModal, settlementHTML } from './ui.js';
+import { renderTable, appendLog, clearLog, setTableMsg, showModal, resetEquityCache, showAmountModal, settlementHTML, leaderboardHTML } from './ui.js';
 import { describeEval, HAND_NAMES } from './poker.js';
 import { getClientId, createRoom, fetchRoom, updateRoomState, mutateRoomState, casRoomState, RoomChannel, checkBackend } from './net.js';
 import { serializeGame, buildViewModel, deriveOptions } from './sync.js';
@@ -17,7 +17,22 @@ import { saveMyRecord, fetchMyRecords, summarize, fetchRoomCarry, invalidateRoom
 const $ = id => document.getElementById(id);
 const overlay = () => $('overlayRoot');
 
-const CLIENT_ID = getClientId();
+// 身份标识：登录后一律用账号 id，这样同一个账号在手机和电脑上
+// 被认作同一个玩家——换设备打开会接管原座位，而不是变成第二个人占掉
+// 一个新座位。未登录时退回设备级随机 id（游客模式）。
+// 注意：登录/登出会改变身份，所以这里不能用 const 固定住。
+let CLIENT_ID = identityId();
+
+function identityId() {
+  const u = currentUser();
+  return u?.id ? `u:${u.id}` : getClientId();
+}
+
+// 登录状态变化后刷新身份
+function refreshIdentity() {
+  CLIENT_ID = identityId();
+  return CLIENT_ID;
+}
 
 // ---------- 全局会话状态 ----------
 const session = {
@@ -226,6 +241,7 @@ async function boot() {
     return;
   }
   // 已有会话：顺手拉一次资料，失败也不阻塞进大厅
+  refreshIdentity();
   try {
     myProfile = await fetchProfile();
   } catch (err) {
@@ -240,6 +256,7 @@ function showAuth() {
   renderAuth(overlay(), {
     onLogin: async ({ email, password }) => {
       await signIn(email, password);
+      refreshIdentity();
       setAuthMsg('登录成功，正在进入…', 'ok');
       try {
         myProfile = await fetchProfile();
@@ -253,6 +270,7 @@ function showAuth() {
         setAuthMsg('注册成功，但该项目开启了邮箱验证。请去邮箱点验证链接后再登录', 'ok');
         return;
       }
+      refreshIdentity();
       setAuthMsg('注册成功，正在进入…', 'ok');
       myProfile = { nickname, avatar };
       showLobby();
@@ -262,11 +280,21 @@ function showAuth() {
 }
 
 async function handleLogout() {
+  // 先把座位让出来再登出：登出后身份会变回游客 id，
+  // 那时已经匹配不到自己原来的座位，会把座位永久占死
+  await releaseMySeat();
+  session.channel?.close();
+  session.channel = null;
+  game = null;
+  viewModel = null;
   await signOut();
+  refreshIdentity();
   myProfile = null;
   session.code = null;
   session.isHost = false;
   session.mySeatId = null;
+  session.seats = [];
+  session.remoteState = null;
   showAuth();
 }
 
@@ -523,7 +551,81 @@ function showWaiting() {
   setNetStatus('实时连接中…');
 }
 
-function leaveRoom() {
+// 中途退出：把自己的座位让出来，并把当前筹码存进本房间的存档。
+// 座位不释放的话，别人看到的永远是「六个座位都坐满了」。
+// 用 mutateRoomState 做读-改-写，避免和并发的入座/借还互相覆盖。
+async function releaseMySeat() {
+  const code = session.code;
+  if (!code || session.mySeatId == null) return;
+
+  // 先把我此刻的筹码存档，否则中途退出这段盈亏就丢了
+  await saveMyChipsOnExit();
+
+  const me = CLIENT_ID;
+  try {
+    await mutateRoomState(code, state => {
+      const seats = Array.isArray(state.seats) ? state.seats.map(s => ({ ...s })) : [];
+      const idx = seats.findIndex(s => s.owner === me);
+      if (idx < 0) return null; // 座位已经不是我的了，无需改动
+      // 0 号位是房主位，房主走了整局就散了，保留空位不补 AI；
+      // 其他位置腾成开放的真人空位，方便后来的人直接坐进来
+      seats[idx] = { type: 'human', owner: null, name: '', avatar: '' };
+      return { ...state, seats };
+    });
+  } catch (err) {
+    console.warn('[room] 释放座位失败', err);
+  }
+}
+
+// 把「当前筹码」写成本房间的存档。中途退出没有结算单，
+// 所以自己拼一份只含我这一行的最小结算数据复用 saveMyRecord。
+async function saveMyChipsOnExit() {
+  if (!isLoggedIn() || !session.code) return;
+  const snap = myLedgerSnapshot();
+  if (!snap) return;
+  const { stack, borrowed, repaid } = snap;
+  const buyIn = session.myCarry != null ? session.myCarry : stack;
+  const settlement = {
+    ts: Date.now(),
+    hands: game ? (game.handNo || 0) : 0,
+    rows: [{
+      seatId: session.mySeatId,
+      name: session.myName,
+      isAI: false,
+      isHero: true,
+      stack,
+      buyIn,
+      borrowed,
+      repaid,
+      net: stack - buyIn - borrowed + repaid
+    }]
+  };
+  try {
+    await saveMyRecord(settlement, { roomCode: session.code, mySeatId: session.mySeatId });
+    invalidateRoomCarry(session.code);
+  } catch (err) {
+    console.warn('[room] 退出存档失败', err);
+  }
+}
+
+// 取我此刻的筹码与账本：房主读引擎，客机读视图。
+// 注意视图里这个数组叫 players（不是 seats）。
+function myLedgerSnapshot() {
+  const list = game ? game.players : (viewModel ? viewModel.players : null);
+  if (!Array.isArray(list)) return null;
+  const p = list.find(x => x && x.seatOwner === CLIENT_ID);
+  if (!p) return null;
+  return {
+    stack: p.stack || 0,
+    borrowed: p.borrowed || 0,
+    repaid: p.repaid || 0
+  };
+}
+
+async function leaveRoom() {
+  // 先释放座位（内部会顺手存档筹码），再断连接。
+  // 顺序不能反：断了通道就写不进共享状态了。
+  await releaseMySeat();
   session.channel?.close();
   session.channel = null;
   game = null;
@@ -531,6 +633,8 @@ function leaveRoom() {
   session.code = null;
   session.seats = [];
   session.remoteState = null;
+  session.mySeatId = null;
+  session.myCarry = null;
   // 聊天记录属于房间，离开就清空，避免下一个房间串台
   chatLocal = [];
   chatUnread = 0;
@@ -1456,6 +1560,25 @@ function bindEvents() {
     }
   });
 
+  // 排行榜：读当前牌桌状态即时渲染。房主端取 game，客机端取 viewModel，
+  // currentGame() 已经封装了这个分叉，所以两端行为一致。
+  $('btnRank').addEventListener('click', () => {
+    const g = currentGame();
+    if (!g) {
+      showModal({
+        title: '📊 筹码排行榜',
+        body: '<p class="text-sm text-slate-400">还没有进入牌局，暂时没有可排名的玩家。</p>',
+        actions: [{ label: '知道了', primary: true }]
+      });
+      return;
+    }
+    showModal({
+      title: '📊 筹码排行榜',
+      body: leaderboardHTML(g),
+      actions: [{ label: '关闭', primary: true }]
+    });
+  });
+
   $('btnRules').addEventListener('click', () => {
     showModal({ title: '德州扑克规则速览', body: RULES_HTML, actions: [{ label: '知道了', primary: true }] });
   });
@@ -1465,9 +1588,12 @@ function bindEvents() {
   $('btnSettle').addEventListener('click', handleSettle);
 
   $('btnLeave').addEventListener('click', () => {
+    const isHost = session.isHost;
     showModal({
       title: '离开房间',
-      body: '<p>将退出当前牌局回到大厅。若你是房主，本局将无法继续。</p>',
+      body: isHost
+        ? '<p>你是房主，离开后本局无法继续。</p><p class="text-xs text-slate-400 mt-2">你当前的筹码会存入本房间，下次用同一房间号重开可接着打。</p>'
+        : '<p>将退出当前牌局回到大厅，你的座位会让给其他人。</p><p class="text-xs text-emerald-300 mt-2">当前筹码会存入本房间，下次进同一房间号会自动带回来。</p>',
       actions: [{ label: '取消' }, { label: '确认离开', primary: true, onClick: leaveRoom }]
     });
   });
