@@ -85,7 +85,9 @@ export class PokerGame {
           seatOwner: seat.owner,
           isAI: false,
           empty: false,
-          stack: seat.stack != null ? seat.stack : this.startingStack
+          stack: seat.stack != null ? seat.stack : this.startingStack,
+          // 上一场没还完的欠款，随人带入，由 syncLedger 记进账本
+          carryDebt: Math.max(0, Math.floor(Number(seat.debt) || 0))
         };
       }
       if (seat.type === 'ai') {
@@ -159,8 +161,16 @@ export class PokerGame {
         // stack 为 0 时兜底必须是 0，不能填 startingStack——否则等着被
         // autoRefillBusted 补码的人会把那 2000 记成「自带买入」，
         // 借款被抵消，净欠归零，牌池账面对不上。
-        rec = { borrowed: 0, repaid: 0, buyIn: p.stack > 0 ? p.stack : 0 };
+        //
+        // carryDebt 是上一场没还完的欠款，跟着人搬过来。记成 borrowed
+        // 而不去动 buyIn：这样 net = stack - buyIn - borrowed + repaid
+        // 天然把旧债扣掉，欠款继续挂在账上，不需要额外字段。
+        const debt = Math.max(0, Math.floor(Number(p.carryDebt) || 0));
+        rec = { borrowed: debt, repaid: 0, buyIn: p.stack > 0 ? p.stack : 0 };
         this.ledger.set(key, rec);
+        if (debt > 0) {
+          this.log(`${p.name} 带入上一场未结清欠款 ${debt}，继续挂在账上`, 'bank');
+        }
       }
       p.ledgerKey = key;
       p.borrowed = rec.borrowed;
@@ -349,6 +359,9 @@ export class PokerGame {
 
   log(text, type = 'info') {
     const entry = { text, type, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }) };
+    // 构造阶段 initPlayers 早于 resetTableState，此时 logs 还不存在。
+    // 建账日志会在那个时刻触发，所以这里必须自愈而不是直接崩。
+    if (!Array.isArray(this.logs)) this.logs = [];
     this.logs.push(entry);
     this.emit('log', entry);
   }
@@ -848,7 +861,9 @@ export class PokerGame {
         // 否则这 2000 绕过账本变成白送，随后 autoRefillBusted 也不会记账。
         // 补码统一交给 autoRefillBusted，确保每一笔都落到 borrowed 上。
         const known = prevByOwner.has(seat.owner);
-        if (known) return { ...seat, stack: old.stack || 0 };
+        // 已在座者的带入欠款早已记进账本，座位上的 debt 是历史残留。
+        // 必须清掉：否则一旦账本被重建，这笔债会被当成新的带入再记一次。
+        if (known) return { ...seat, stack: old.stack || 0, debt: 0 };
         // 新入座者：座位上带了存档筹码就用它（同房间续打），否则给起始筹码
         const carried = seat.stack != null ? seat.stack : this.startingStack;
         return { ...seat, stack: carried };

@@ -160,8 +160,12 @@ const RULES_HTML = `
 // 六人桌：0 号是房主，1 号默认开放给真人，其余先用 AI 占位，房主可在等待界面调整
 function buildInitialSeats(name, avatar, carry) {
   const host = { type: 'human', owner: CLIENT_ID, name, avatar };
-  // 有存档就带入，没有则交给引擎用 startingStack 兜底
-  if (carry != null) host.stack = carry;
+  // 有存档就带入，没有则交给引擎用 startingStack 兜底。
+  // 手上筹码和未结清欠款一起搬，等于把上一场的桌面状态原样搬过来。
+  if (carry != null) {
+    host.stack = carry.stack;
+    if (carry.debt > 0) host.debt = carry.debt;
+  }
   const seats = [host];
   seats.push({ type: 'human', owner: null, name: '', avatar: '' });
   for (let i = 2; i < MAX_SEATS; i++) seats.push({ type: 'ai' });
@@ -174,9 +178,22 @@ function humanCount(seats) {
 
 // 找一个可坐的位置：优先空着的真人位，其次把 AI 位挤掉
 function findOpenSeat(seats) {
+  // 0 号位是房主位。它空着说明原房主已离席，这时优先让人坐进去，
+  // 否则一桌人都坐在 1~5 号位，没有房主能发牌，谁也打不了。
+  const zero = seats[0];
+  if (zero && zero.type === 'human' && !zero.owner) return 0;
   let idx = seats.findIndex(s => s.type === 'human' && !s.owner);
   if (idx >= 0) return idx;
   return seats.findIndex(s => s.type === 'ai');
+}
+
+// 方案 A：谁坐 0 号位，谁就是房主。
+// 以座位表为唯一依据，不再依赖建房时写死的 hostId——这样原房主退出后
+// 新坐上 0 号位的人能自动接管发牌权，不会出现「显示房主发牌但没人是房主」。
+function hostOwnerOf(seats) {
+  const zero = Array.isArray(seats) ? seats[0] : null;
+  if (!zero || zero.type !== 'human') return null;
+  return zero.owner || null;
 }
 
 // ---------- 当前渲染对象 ----------
@@ -460,12 +477,20 @@ async function handleJoin({ name, avatar, code }) {
     // 否则会把这一场已经打出来的盈亏抹掉
     const carry = await fetchRoomCarry(code);
     const seat = { type: 'human', owner: CLIENT_ID, name, avatar };
-    if (carry != null) seat.stack = carry;
+    if (carry != null) {
+      seat.stack = carry.stack;
+      if (carry.debt > 0) seat.debt = carry.debt;
+    }
     session.myCarry = carry;
     seats[seatIdx] = seat;
+  } else {
+    // 重连回原座位：座位不用改，但 myCarry 必须补上。
+    // 少了这一步，saveMyChipsOnExit 会把 buyIn 退化成当前 stack，
+    // 算出 net=0，把这一场的盈亏写成 0 存进库。
+    session.myCarry = await fetchRoomCarry(code);
   }
 
-  session.isHost = false;
+  session.isHost = hostOwnerOf(seats) === CLIENT_ID;
   session.mySeatId = seatIdx;
   session.myName = name;
   session.myAvatar = avatar;
@@ -474,6 +499,13 @@ async function handleJoin({ name, avatar, code }) {
   session.lastVersion = state.v || 0;
 
   const next = { ...state, seats, pv: PROTOCOL_VERSION, v: (state.v || 0) + 1, ts: Date.now() };
+  // 坐上 0 号位就是新房主：把 hostId 认到自己名下。
+  // 原房主留下的牌局数据已经没有权威端在推进了，退回等待态由新房主重开，
+  // 直接接着打会因为缺少引擎实例而卡住。
+  if (session.isHost) {
+    next.hostId = CLIENT_ID;
+    next.phase = 'waiting';
+  }
 
   // 先建立订阅再写入座位，否则房主可能收不到本次入座事件
   setLobbyMsg('正在建立实时连接…');
@@ -567,10 +599,19 @@ async function releaseMySeat() {
       const seats = Array.isArray(state.seats) ? state.seats.map(s => ({ ...s })) : [];
       const idx = seats.findIndex(s => s.owner === me);
       if (idx < 0) return null; // 座位已经不是我的了，无需改动
-      // 0 号位是房主位，房主走了整局就散了，保留空位不补 AI；
-      // 其他位置腾成开放的真人空位，方便后来的人直接坐进来
+      // 腾成开放的真人空位，方便后来的人直接坐进来。
+      // 0 号位是房主位：房主离席后这个位子空着，谁坐进去谁就是新房主
+      // （见 hostOwnerOf），所以这里同样只清 owner，不补 AI。
       seats[idx] = { type: 'human', owner: null, name: '', avatar: '' };
-      return { ...state, seats };
+      const next = { ...state, seats };
+      // 房主自己走了：清掉 hostId，并把牌局打回等待态。
+      // 不清的话新坐上 0 号位的人会因为 hostId 不是自己而拿不到权威身份，
+      // 整桌就卡在「房主发牌」却没人能发牌的死局。
+      if (idx === 0) {
+        next.hostId = null;
+        next.phase = 'waiting';
+      }
+      return next;
     });
   } catch (err) {
     console.warn('[room] 释放座位失败', err);
@@ -584,7 +625,10 @@ async function saveMyChipsOnExit() {
   const snap = myLedgerSnapshot();
   if (!snap) return;
   const { stack, borrowed, repaid } = snap;
-  const buyIn = session.myCarry != null ? session.myCarry : stack;
+  // buyIn 取带入时的手上筹码。带入的旧欠款已由引擎记进 borrowed，
+  // 这里不能再从 buyIn 里扣一次，否则同一笔债被算两遍。
+  const carried = session.myCarry;
+  const buyIn = carried && carried.stack != null ? carried.stack : stack;
   const settlement = {
     ts: Date.now(),
     hands: game ? (game.handNo || 0) : 0,
@@ -732,6 +776,27 @@ function handleRemoteRow(row) {
   // 聊天对房主与客机是同一份数据，先统一刷新再走各自分支
   refreshChat(state.chat);
 
+  // 方案 A：房主身份始终以 0 号位归属为准，每次状态到达都重新判定。
+  // 这样原房主退出、别人坐上 0 号位后，各端会自动收敛到同一个房主，
+  // 不会再出现「桌上提示房主发牌，但没有任何人持有权威引擎」的死局。
+  const hostOwner = hostOwnerOf(state.seats || session.seats);
+  const shouldBeHost = !!hostOwner && hostOwner === CLIENT_ID;
+  if (shouldBeHost !== session.isHost) {
+    session.isHost = shouldBeHost;
+    if (shouldBeHost) {
+      // 我刚接管：丢掉只读视图，回等待界面用自己的引擎重开
+      viewModel = null;
+      game = null;
+      session.seats = state.seats || session.seats;
+      appendLog('原房主已离开，你坐在 0 号位，现在由你担任房主', 'stage');
+      setShellVisible(false);
+      showWaiting();
+      return;
+    }
+    // 我不再是房主（例如被顶掉或自己换了座位）：退回客机视角
+    game = null;
+  }
+
   if (session.isHost) {
     // 房主：只关心座位变化与客机回传的动作
     if (state.seats) {
@@ -739,8 +804,9 @@ function handleRemoteRow(row) {
       if (session.phase === 'waiting') showWaiting();
       else if (session.phase === 'playing') applySeatChange();
     }
-    // 借还已由客机自助写入账本，房主只需采纳差额并兑换筹码
-    if (state.bank) game.adoptBank(state.bank);
+    // 借还已由客机自助写入账本，房主只需采纳差额并兑换筹码。
+    // 刚接管还没开局时 game 为 null，这里必须防空，否则整条同步链会崩。
+    if (state.bank && game) game.adoptBank(state.bank);
     if (state.action || (Array.isArray(state.actionQueue) && state.actionQueue.length)) consumeActionQueue(state);
     return;
   }

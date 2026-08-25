@@ -104,14 +104,18 @@ export function renderLobby(root, { onCreate, onJoin, defaultName, defaultAvatar
       hint.textContent = '正在查询该房间的筹码存档…';
       hint.className = 'text-[11px] text-slate-400 min-h-4 mb-3';
       try {
-        const chips = await onPeekCarry(code);
+        const carry = await onPeekCarry(code);
         if (mine !== seq) return;
-        if (chips == null) {
+        if (carry == null) {
           hint.textContent = '这个房间还没有你的筹码记录，将按起始筹码入座';
           hint.className = 'text-[11px] text-slate-500 min-h-4 mb-3';
         } else {
-          hint.textContent = `将带入你在该房间的筹码：${chips}`;
-          hint.className = 'text-[11px] text-emerald-300 min-h-4 mb-3';
+          hint.textContent = carry.debt > 0
+            ? `将带入筹码 ${carry.stack}，并继续挂着欠牌池的 ${carry.debt}`
+            : `将带入你在该房间的筹码：${carry.stack}`;
+          hint.className = carry.debt > 0
+            ? 'text-[11px] text-amber-300 min-h-4 mb-3'
+            : 'text-[11px] text-emerald-300 min-h-4 mb-3';
         }
       } catch {
         if (mine !== seq) return;
@@ -229,8 +233,8 @@ export function renderWaiting(root, { code, seats, isHost, mySeatId, onStart, on
           <div id="copyHint" class="text-xs text-emerald-300 h-4 mb-4"></div>
 
           ${myCarry != null ? `
-          <div class="rounded-xl bg-emerald-500/10 border border-emerald-400/40 px-3 py-2 mb-4 text-xs text-emerald-200">
-            <i class="ri-history-line mr-1"></i>已带入你在本房间的历史筹码 <b class="font-mono">${myCarry}</b>
+          <div class="rounded-xl ${myCarry.debt > 0 ? 'bg-amber-500/10 border-amber-400/40 text-amber-200' : 'bg-emerald-500/10 border-emerald-400/40 text-emerald-200'} border px-3 py-2 mb-4 text-xs">
+            <i class="ri-history-line mr-1"></i>已带入你在本房间的历史筹码 <b class="font-mono">${myCarry.stack}</b>${myCarry.debt > 0 ? `，并继续欠牌池 <b class="font-mono">${myCarry.debt}</b>` : ''}
           </div>` : ''}
 
           <div class="space-y-2 mb-4 text-left">

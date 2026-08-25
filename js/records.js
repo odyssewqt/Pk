@@ -110,7 +110,7 @@ const ROOM_INHERIT = {
 // 单纯的一次查询，不含继承逻辑，供 fetchRoomCarry 复用。
 async function queryCarry(code) {
   const res = await authedFetch(
-    `/match_records?select=end_chips,played_at&room_code=eq.${encodeURIComponent(code)}`
+    `/match_records?select=end_chips,borrowed,repaid,played_at&room_code=eq.${encodeURIComponent(code)}`
     + `&order=played_at.desc&limit=1`,
     {},
     '读取房间筹码失败'
@@ -118,13 +118,21 @@ async function queryCarry(code) {
   if (!res.ok) return null;
   const rows = await res.json();
   if (!Array.isArray(rows) || !rows.length) return null;
-  const chips = Number(rows[0].end_chips);
+  const row = rows[0];
+  const chips = Number(row.end_chips);
   // 上次打到 0 也是有效存档（就是没钱了），只有非数字才当作无存档
-  return Number.isFinite(chips) ? Math.max(0, Math.round(chips)) : null;
+  if (!Number.isFinite(chips)) return null;
+  // 未结清的欠款要跟着人走：手上筹码和欠池筹码一起搬到下一场，
+  // 否则换个房间号就等于免债，账面永远对不上。
+  const borrowed = Number(row.borrowed);
+  const repaid = Number(row.repaid);
+  const debt = Math.max(0, Math.round((Number.isFinite(borrowed) ? borrowed : 0) - (Number.isFinite(repaid) ? repaid : 0)));
+  return { stack: Math.max(0, Math.round(chips)), debt };
 }
 
-// 查这个房间我上次打完剩多少筹码。
-// 返回 null 表示该房间没有我的记录（应按起始筹码入座）。
+// 查这个房间我上次打完剩多少筹码、还欠牌池多少。
+// 返回 null 表示该房间没有我的记录（应按起始筹码入座）；
+// 有记录时返回 { stack, debt }，两者都要带入下一场。
 export async function fetchRoomCarry(roomCode) {
   const code = normRoomCode(roomCode);
   if (!code) return null;
