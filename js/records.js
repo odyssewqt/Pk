@@ -90,6 +90,39 @@ function normRoomCode(code) {
   return (code || '').trim().toUpperCase();
 }
 
+// 房间继承表：新房间号 -> 旧房间号。
+//
+// 用途很具体：原来的房间因为房主设备换了、拿不到原始 host 凭据而无法接管，
+// 只能开新号继续打。但每个人的筹码存档是按 room_code 存的，新号查不到。
+// 于是让新号在「我自己在新号还没有任何记录」时，回退去查旧号的存档。
+//
+// 为什么按人判断而不是按房间判断：有人可能第一场没来。若按房间判断，
+// 只要别人打完一场，新号下就有记录了，迟到的人就会被误判成「已继承过」
+// 从而丢掉自己的旧筹码。按 user_id 判断则每个人各自收敛，互不影响。
+//
+// 继承是一次性的：一旦某人在新号打完一场，他在新号就有了 end_chips，
+// 之后自然读新号，不再回退。所以这张表可以长期留着，不会重复生效。
+const ROOM_INHERIT = {
+  '778900': '778899'
+};
+
+// 查某个房间号下我自己最近一场的结束筹码。查不到返回 null。
+// 单纯的一次查询，不含继承逻辑，供 fetchRoomCarry 复用。
+async function queryCarry(code) {
+  const res = await authedFetch(
+    `/match_records?select=end_chips,played_at&room_code=eq.${encodeURIComponent(code)}`
+    + `&order=played_at.desc&limit=1`,
+    {},
+    '读取房间筹码失败'
+  );
+  if (!res.ok) return null;
+  const rows = await res.json();
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const chips = Number(rows[0].end_chips);
+  // 上次打到 0 也是有效存档（就是没钱了），只有非数字才当作无存档
+  return Number.isFinite(chips) ? Math.max(0, Math.round(chips)) : null;
+}
+
 // 查这个房间我上次打完剩多少筹码。
 // 返回 null 表示该房间没有我的记录（应按起始筹码入座）。
 export async function fetchRoomCarry(roomCode) {
@@ -99,21 +132,20 @@ export async function fetchRoomCarry(roomCode) {
   if (carryCache.has(code)) return carryCache.get(code);
 
   try {
-    const res = await authedFetch(
-      `/match_records?select=end_chips,played_at&room_code=eq.${encodeURIComponent(code)}`
-      + `&order=played_at.desc&limit=1`,
-      {},
-      '读取房间筹码失败'
-    );
-    if (!res.ok) return null;
-    const rows = await res.json();
-    if (!Array.isArray(rows) || !rows.length) {
-      carryCache.set(code, null);
-      return null;
+    let val = await queryCarry(code);
+
+    // 我在这个房间还没有任何记录时，才考虑继承旧房间的存档
+    if (val == null) {
+      const from = ROOM_INHERIT[code];
+      if (from) {
+        const inherited = await queryCarry(normRoomCode(from));
+        if (inherited != null) {
+          console.info(`[records] 房间 ${code} 继承 ${from} 的存档筹码 ${inherited}`);
+          val = inherited;
+        }
+      }
     }
-    const chips = Number(rows[0].end_chips);
-    // 上次打到 0 也是有效存档（就是没钱了），只有非数字才当作无存档
-    const val = Number.isFinite(chips) ? Math.max(0, Math.round(chips)) : null;
+
     carryCache.set(code, val);
     return val;
   } catch (err) {
